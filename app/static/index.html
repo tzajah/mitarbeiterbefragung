@@ -249,8 +249,8 @@ async function loadReviewList() {
 }
 
 async function openReview(id) {
-  const [detail, stacks] = await Promise.all([
-    api("/api/responses/" + id), api("/api/stacks")
+  const [detail, stacks, spec] = await Promise.all([
+    api("/api/responses/" + id), api("/api/stacks"), api("/api/spec")
   ]);
   reviewState = { id, stacks };
   $("#review-img").src = detail.image_url;
@@ -261,14 +261,17 @@ async function openReview(id) {
   const box = $("#review-answers");
   box.innerHTML = "";
   for (const a of detail.answers) {
-    const opts = ["", ...new Set([a.value].filter(Boolean)
-      .concat(detail.answers.map(x => x.value).filter(Boolean)))]
-      .map(v => `<option value="${esc(v)}" ${v === (a.value || "") ? "selected" : ""}>${esc(v) || "(leer)"}</option>`)
+    const q = spec.questions.find(x => x.id === a.question_id);
+    // ALLE gültigen Optionen anbieten – auch wenn die Automatik etwas anderes erkannt hat
+    const opts = ['<option value="">(leer)</option>']
+      .concat((q ? q.answers : [a.value].filter(Boolean)).map(v =>
+        `<option value="${esc(v)}" ${v === a.value ? "selected" : ""}>${esc(v)}</option>`))
       .join("");
     box.insertAdjacentHTML("beforeend", `
       <div class="ans">
-        <span class="muted">${esc(a.question_id)}</span>
-        <span>${a.needs_review ? '<span class="badge warn">prüfen</span>' : ""}</span>
+        <span class="muted" title="${esc(q ? q.text : a.question_id)}">${esc(a.question_id)}</span>
+        <span>${a.needs_review ? '<span class="badge warn">prüfen</span>' : ""}
+              ${a.note ? `<span class="muted">${esc(a.note)}</span>` : ""}</span>
         <select data-qid="${esc(a.question_id)}">${opts}</select>
       </div>`);
   }

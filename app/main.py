@@ -1,7 +1,9 @@
 """FastAPI-Backend: Stapel drucken, Scans einlesen, Review, k-anonyme Auswertung."""
 from __future__ import annotations
 
+import re
 import uuid
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
@@ -15,14 +17,25 @@ from .formgen.generator import render_pdf
 from .formgen.spec import SurveySpec, default_spec
 from .scan.reader import read_scan
 
-app = FastAPI(title="Mitarbeiterbefragung", version="0.1.0")
+MAX_UPLOAD_BYTES = 25 * 1024 * 1024
+K_MIN, K_MAX = 2, 100
+_ID_RE = re.compile(r"^[a-f0-9]{32}$")
 
 
-@app.on_event("startup")
-def _startup() -> None:
+def _valid_id(value: str) -> bool:
+    """IDs sind 32 Hex-Zeichen; blockt Pfad-Traversal über URL-Parameter."""
+    return bool(_ID_RE.match(value or ""))
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
     init_db()
     SCANS_DIR.mkdir(parents=True, exist_ok=True)
     TEMPLATES_DIR.mkdir(parents=True, exist_ok=True)
+    yield
+
+
+app = FastAPI(title="Mitarbeiterbefragung", version="0.1.0", lifespan=lifespan)
 
 
 # ---------- Spec-Auflösung (MVP: genau eine aktive Spec) ----------
@@ -39,6 +52,9 @@ class StackCreate(BaseModel):
 
 @app.post("/api/stacks")
 def create_stack(body: StackCreate):
+    dept = body.department.strip()
+    if not dept or len(dept) > 80:
+        raise HTTPException(422, "Abteilungsname fehlt oder zu lang (max. 80 Zeichen)")
     stack_id = uuid.uuid4().hex
     spec = _active_spec()
     pdf = render_pdf(spec, stack_id)
@@ -46,8 +62,8 @@ def create_stack(body: StackCreate):
     pdf_path.write_bytes(pdf)
     with get_db() as db:
         db.execute("INSERT INTO stacks (id, department) VALUES (?, ?)",
-                   (stack_id, body.department.strip()))
-    return {"stack_id": stack_id, "department": body.department,
+                   (stack_id, dept))
+    return {"stack_id": stack_id, "department": dept,
             "pdf_url": f"/api/stacks/{stack_id}/pdf"}
 
 
@@ -65,6 +81,8 @@ def list_stacks():
 
 @app.get("/api/stacks/{stack_id}/pdf")
 def stack_pdf(stack_id: str):
+    if not _valid_id(stack_id):
+        raise HTTPException(404, "Stapel-PDF nicht gefunden")
     p = TEMPLATES_DIR / f"{stack_id}.pdf"
     if not p.exists():
         raise HTTPException(404, "Stapel-PDF nicht gefunden")
@@ -76,6 +94,8 @@ def stack_pdf(stack_id: str):
 @app.post("/api/scans")
 async def upload_scan(file: UploadFile = File(...)):
     image_bytes = await file.read()
+    if len(image_bytes) > MAX_UPLOAD_BYTES:
+        raise HTTPException(413, "Bild zu groß (max. 25 MB)")
     spec = _active_spec()
     try:
         result = read_scan(image_bytes, spec)
@@ -109,6 +129,17 @@ async def upload_scan(file: UploadFile = File(...)):
     }
 
 
+# ---------- Spec für das Frontend ----------
+
+@app.get("/api/spec")
+def get_spec():
+    spec = _active_spec()
+    d = spec.to_dict()
+    for q, qd in zip(spec.questions, d["questions"]):
+        qd["answers"] = q.answers()
+    return d
+
+
 # ---------- Review ----------
 
 @app.get("/api/responses")
@@ -128,6 +159,8 @@ def list_responses(finalized: bool = False):
 
 @app.get("/api/responses/{response_id}")
 def response_detail(response_id: str):
+    if not _valid_id(response_id):
+        raise HTTPException(404, "Antwort nicht gefunden")
     with get_db() as db:
         row = db.execute("""
             SELECT r.*, st.department FROM responses r
@@ -144,6 +177,8 @@ def response_detail(response_id: str):
 
 @app.get("/api/responses/{response_id}/image")
 def response_image(response_id: str):
+    if not _valid_id(response_id):
+        raise HTTPException(404, "Scan-Bild nicht gefunden")
     p = SCANS_DIR / f"{response_id}.jpg"
     if not p.exists():
         raise HTTPException(404, "Scan-Bild nicht gefunden")
@@ -158,15 +193,26 @@ class FinalizeBody(BaseModel):
 
 @app.post("/api/responses/{response_id}/finalize")
 def finalize_response(response_id: str, body: FinalizeBody):
+    if not _valid_id(response_id):
+        raise HTTPException(404, "Antwort nicht gefunden")
+    spec = _active_spec()
+    valid_values = {q.id: set(q.answers()) for q in spec.questions}
     with get_db() as db:
         row = db.execute("SELECT finalized FROM responses WHERE id = ?",
                          (response_id,)).fetchone()
         if not row:
             raise HTTPException(404, "Antwort nicht gefunden")
+        if row["finalized"]:
+            raise HTTPException(409, "Bogen ist bereits finalisiert")
         if not body.stack_id:
             raise HTTPException(400, "Stapel-Zuordnung fehlt (Abteilung)")
         if not db.execute("SELECT 1 FROM stacks WHERE id = ?", (body.stack_id,)).fetchone():
             raise HTTPException(400, "Unbekannter Stapel")
+        for qid, value in body.corrections.items():
+            if qid not in valid_values:
+                raise HTTPException(422, f"Unbekannte Frage: {qid}")
+            if value is not None and value not in valid_values[qid]:
+                raise HTTPException(422, f"Ungültiger Wert für {qid}: {value!r}")
         for qid, value in body.corrections.items():
             db.execute(
                 "UPDATE answers SET value = ?, needs_review = 0, source = 'human'"
@@ -182,6 +228,8 @@ def finalize_response(response_id: str, body: FinalizeBody):
 
 @app.get("/api/results")
 def results(k: int = K_DEFAULT):
+    # Schutz vor versehentlicher De-Anonymisierung: k wird auf [K_MIN, K_MAX] geklemmt
+    k = max(K_MIN, min(K_MAX, k))
     with get_db() as db:
         departments = db.execute("""
             SELECT st.department AS dept, COUNT(*) AS n

@@ -96,3 +96,64 @@ def test_stapel_liste(client):
     client.post("/api/stacks", json={"department": "Produktion Nord"})
     rows = client.get("/api/stacks").json()
     assert rows and rows[0]["department"] == "Produktion Nord"
+
+
+def test_double_finalize_blocked(client):
+    r = client.post("/api/stacks", json={"department": "IT"})
+    stack = r.json()
+    fin1 = client.post(f"/api/responses/{'0'*32}/finalize",
+                       json={"stack_id": stack["stack_id"]})
+    assert fin1.status_code == 404  # unbekannte ID
+
+
+def test_finalize_double_on_real_response(client):
+    rng = np.random.default_rng(77)
+    stack = client.post("/api/stacks", json={"department": "HR"}).json()
+    pdf = client.get(stack["pdf_url"]).content
+    scan, _ = _make_scan_for_stack(pdf, rng)
+    up = client.post("/api/scans",
+                     files={"file": ("s.jpg", scan, "image/jpeg")}).json()
+    rid = up["response_id"]
+    ok = client.post(f"/api/responses/{rid}/finalize",
+                     json={"stack_id": stack["stack_id"], "free_text": "x"})
+    assert ok.status_code == 200
+    dup = client.post(f"/api/responses/{rid}/finalize",
+                      json={"stack_id": stack["stack_id"]})
+    assert dup.status_code == 409, "Doppel-Finalisierung muss blockiert werden"
+
+
+def test_invalid_correction_rejected(client):
+    rng = np.random.default_rng(78)
+    stack = client.post("/api/stacks", json={"department": "Logistik"}).json()
+    pdf = client.get(stack["pdf_url"]).content
+    scan, _ = _make_scan_for_stack(pdf, rng)
+    up = client.post("/api/scans",
+                     files={"file": ("s.jpg", scan, "image/jpeg")}).json()
+    bad = client.post(f"/api/responses/{up['response_id']}/finalize",
+                      json={"stack_id": stack["stack_id"],
+                            "corrections": {"q01": "Quatsch-Wert"}})
+    assert bad.status_code == 422
+
+
+def test_path_traversal_blocked(client):
+    assert client.get("/api/responses/..%5C..%5Cgeheim/image").status_code == 404
+    assert client.get("/api/responses/nicht-hex/image").status_code == 404
+    assert client.get("/api/stacks/..%2F..%2Fgeheim/pdf").status_code == 404
+
+
+def test_k_is_clamped(client):
+    res = client.get("/api/results?k=1").json()
+    assert res["k"] == 2, "k=1 muss auf K_MIN=2 geklemmt werden"
+    res = client.get("/api/results?k=99999").json()
+    assert res["k"] == 100
+
+
+def test_department_validation(client):
+    assert client.post("/api/stacks", json={"department": "   "}).status_code == 422
+    assert client.post("/api/stacks", json={"department": "x" * 81}).status_code == 422
+
+
+def test_spec_endpoint(client):
+    spec = client.get("/api/spec").json()
+    assert spec["questions"][0]["answers"]
+    assert len(spec["questions"]) == 25
