@@ -170,3 +170,77 @@ def test_demo_scan_lands_in_review(client):
     # unfinalisiert → muss in der Review-Liste auftauchen
     open_rows = client.get("/api/responses?finalized=false").json()
     assert any(row["id"] == demo["response_id"] for row in open_rows)
+
+
+# ---------- Auth (Server-Betrieb) ----------
+
+def _auth_client(monkeypatch, tmp_path):
+    """TestClient mit aktiviertem Login (APP_PASSWORD gesetzt)."""
+    import os
+    monkeypatch.setenv("APP_PASSWORD", "test-1234")
+    monkeypatch.setenv("APP_USER", "chef")
+    from app.main import app
+    with TestClient(app) as c:
+        yield c
+
+
+def test_auth_disabled_by_default(monkeypatch, tmp_path):
+    for var in ("APP_PASSWORD", "APP_PASSWORD_HASH", "APP_SECRET"):
+        monkeypatch.delenv(var, raising=False)
+    from app.main import app
+    with TestClient(app) as c:
+        assert c.get("/api/health").json() == {"ok": True, "auth": False}
+        assert c.get("/api/stacks").status_code == 200  # offen wie gehabt
+
+
+def test_auth_blocks_and_login_works(monkeypatch, tmp_path):
+    for var in ("APP_PASSWORD_HASH", "APP_SECRET"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("APP_PASSWORD", "test-1234")
+    monkeypatch.setenv("APP_USER", "chef")
+    from app.main import app
+    with TestClient(app) as c:
+        # Geschützt: ohne Login 401 (API) bzw. Redirect (Seiten)
+        r = c.get("/api/stacks")
+        assert r.status_code == 401
+        r = c.get("/", follow_redirects=False)
+        assert r.status_code == 303 and "/login.html" in r.headers["location"]
+        # Falsches Passwort
+        assert c.post("/api/login", json={"username": "chef", "password": "falsch"}
+                      ).status_code == 401
+        # Richtiges Passwort → Cookie → Zugriff
+        ok = c.post("/api/login", json={"username": "chef", "password": "test-1234"})
+        assert ok.status_code == 200 and "mbf_session" in ok.cookies
+        assert c.get("/api/stacks").status_code == 200
+        assert c.get("/api/results").status_code == 200
+        # Logout räumt auf
+        c.post("/api/logout")
+        assert c.get("/api/stacks").status_code == 401
+
+
+def test_password_hash_mode(monkeypatch):
+    import hashlib
+    salt = os.urandom(16).hex() if (os := __import__("os")) else ""
+    h = (f"scrypt$16384$8$1${salt}$"
+         f"{hashlib.scrypt(b'geheim', salt=bytes.fromhex(salt), n=16384, r=8, p=1).hex()}")
+    monkeypatch.delenv("APP_PASSWORD", raising=False)
+    monkeypatch.setenv("APP_PASSWORD_HASH", h)
+    monkeypatch.setenv("APP_USER", "admin")
+    from app.main import app
+    with TestClient(app) as c:
+        assert c.post("/api/login", json={"username": "admin", "password": "geheim"}
+                      ).status_code == 200
+        assert c.post("/api/login", json={"username": "admin", "password": "falsch"}
+                      ).status_code == 401
+
+
+def test_session_tampering_rejected(monkeypatch):
+    monkeypatch.setenv("APP_PASSWORD", "test-1234")
+    from app.main import app
+    with TestClient(app) as c:
+        c.post("/api/login", json={"username": "admin", "password": "test-1234"})
+        good = c.cookies.get("mbf_session")
+        assert good
+        tampered = good[:-4] + ("aaaa" if good[-4:] != "aaaa" else "bbbb")
+        c.cookies.set("mbf_session", tampered)
+        assert c.get("/api/stacks").status_code == 401

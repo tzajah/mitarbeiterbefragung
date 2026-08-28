@@ -11,6 +11,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from .auth import auth_middleware, register_auth
 from .config import K_DEFAULT, SCANS_DIR, TEMPLATES_DIR
 from .db import get_db, init_db
 from .formgen.generator import render_pdf
@@ -36,6 +37,8 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="Mitarbeiterbefragung", version="0.1.0", lifespan=lifespan)
+app.middleware("http")(auth_middleware)
+register_auth(app)
 
 
 # ---------- Spec-Auflösung (MVP: genau eine aktive Spec) ----------

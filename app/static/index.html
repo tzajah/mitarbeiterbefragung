@@ -142,6 +142,7 @@
 const $ = (sel) => document.querySelector(sel);
 const api = async (path, opts) => {
   const res = await fetch(path, opts);
+  if (res.status === 401) { location.href = "/login.html"; throw new Error("Nicht eingeloggt"); }
   if (!res.ok) {
     let msg = res.statusText;
     try { msg = (await res.json()).detail || msg; } catch (e) {}

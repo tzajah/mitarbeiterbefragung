@@ -32,6 +32,48 @@ uv run uvicorn app.main:app --port 8765
 # API-Docs:  http://localhost:8765/docs
 ```
 
+Ohne weitere Konfiguration läuft die App offen (nur localhost-Browserzugriff).
+
+## Server-Betrieb (LAN/Docker)
+
+Die App ist ein gewöhnlicher Webdienst (FastAPI + statisches Frontend) und läuft
+auf jedem Server mit Python 3.12+ oder Docker.
+
+### Mit Login-Schutz (empfohlen, sobald die App im LAN hängt)
+
+Setzt man `APP_PASSWORD` (oder sicherer: `APP_PASSWORD_HASH`), schützt ein
+Session-Cookie-Login die gesamte App. Hash erzeugen und als Umgebungsvariable setzen:
+
+```bash
+python -c "import os,hashlib; s=os.urandom(16).hex(); print('APP_PASSWORD_HASH=scrypt$16384$8$1$'+s+'$'+hashlib.scrypt(b'MEIN_PASSWORT',salt=bytes.fromhex(s),n=16384,r=8,p=1).hex())"
+```
+
+Lokal testen mit Login:
+
+```bash
+APP_USER=admin APP_PASSWORD=... uv run uvicorn app.main:app --host 0.0.0.0 --port 8765
+```
+
+### Docker / Docker Compose
+
+```bash
+cp .env.example .env       # Passwort/Hash eintragen
+docker compose up -d --build
+# → http://<server-ip>:8765
+```
+
+- Daten (SQLite, Scans, Stapel-PDFs) liegen im Volume `./data` → Backup = Ordner sichern.
+- `restart: unless-stopped` hält den Dienst über Neustarts hinweg am Leben.
+- Für HTTPS: Reverse-Proxy vorschalten (z. B. Caddy/nginx) – die App selbst bleibt HTTP.
+
+### Betriebs-Hinweise
+
+- SQLite läuft im WAL-Modus (parallele Leser + Schreiber im Team sind unkritisch).
+- Upload-Limit: 25 MB pro Scan.
+- Die Speicherung erfolgt vollständig lokal im Container/Server – es gibt keine
+  externen API-Aufrufe. DSGVO-Anforderung „Daten verlassen das Haus nicht" ist
+  damit per Architektur erfüllt.
+
 ## Tests
 
 ```bash

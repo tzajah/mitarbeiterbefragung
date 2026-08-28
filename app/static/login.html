@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Anmeldung – Mitarbeiterbefragung</title>
+<style>
+  :root { --bg:#f4f4f2; --card:#fff; --ink:#1c1c1c; --muted:#6b6b6b;
+          --accent:#2f6f4f; --danger:#a33; --border:#d9d9d4; }
+  * { box-sizing: border-box; }
+  body { margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center;
+         font-family:"Segoe UI", system-ui, sans-serif; background:var(--bg); color:var(--ink); }
+  .card { background:var(--card); border:1px solid var(--border); border-radius:8px;
+          padding:2rem; width:100%; max-width:360px; }
+  h1 { font-size:1.15rem; margin:0 0 0.3rem; }
+  p { color:var(--muted); font-size:0.88rem; margin:0 0 1.2rem; }
+  label { display:block; font-size:0.85rem; margin:0.7rem 0 0.25rem; }
+  input { width:100%; padding:0.5rem 0.6rem; border:1px solid var(--border);
+          border-radius:6px; font-size:0.95rem; }
+  button { width:100%; margin-top:1.2rem; background:var(--accent); color:#fff;
+           border:none; border-radius:6px; padding:0.6rem; font-size:0.95rem; cursor:pointer; }
+  .err { background:#f6dede; color:var(--danger); border-radius:6px;
+         padding:0.5rem 0.8rem; font-size:0.88rem; margin-top:0.8rem; }
+  .hidden { display:none; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>📋 Mitarbeiterbefragung</h1>
+  <p>Bitte anmelden – der Zugriff ist geschützt.</p>
+  <form onsubmit="return doLogin(event)">
+    <label for="u">Benutzer</label>
+    <input id="u" autocomplete="username" required>
+    <label for="p">Passwort</label>
+    <input id="p" type="password" autocomplete="current-password" required>
+    <button>Anmelden</button>
+  </form>
+  <div id="err" class="err hidden"></div>
+</div>
+<script>
+async function doLogin(ev) {
+  ev.preventDefault();
+  const err = document.getElementById("err");
+  err.classList.add("hidden");
+  try {
+    const res = await fetch("/api/login", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username: document.getElementById("u").value,
+                             password: document.getElementById("p").value })
+    });
+    if (res.ok) { location.href = "/"; return false; }
+    const d = await res.json().catch(() => ({}));
+    err.textContent = d.detail || "Anmeldung fehlgeschlagen";
+    err.classList.remove("hidden");
+  } catch (e) {
+    err.textContent = "Server nicht erreichbar";
+    err.classList.remove("hidden");
+  }
+  return false;
+}
+</script>
+</body>
+</html>

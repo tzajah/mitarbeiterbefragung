@@ -1,0 +1,17 @@
+services:
+  befragung:
+    build: .
+    container_name: mitarbeiterbefragung
+    ports:
+      - "8765:8765"
+    volumes:
+      - ./data:/app/data
+    environment:
+      # Login-Schutz (aktiv, sobald APP_PASSWORD gesetzt ist)
+      - APP_USER=${APP_USER:-admin}
+      - APP_PASSWORD=${APP_PASSWORD:-}
+      # Empfohlen statt Klartext: scrypt-Hash (Generierung siehe README)
+      - APP_PASSWORD_HASH=${APP_PASSWORD_HASH:-}
+      # Session-Signatur; wird automatisch erzeugt, wenn leer
+      - APP_SECRET=${APP_SECRET:-}
+    restart: unless-stopped
