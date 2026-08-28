@@ -178,7 +178,9 @@ async function loadStacks() {
   for (const s of rows) {
     const tr = document.createElement("tr");
     tr.innerHTML = `<td>${esc(s.department)}</td><td class="muted">${s.created_at}</td>
-      <td>${s.n}</td><td><a href="/api/stacks/${s.id}/pdf" target="_blank">PDF öffnen</a></td>`;
+      <td>${s.n}</td>
+      <td><button class="small" onclick="demoScan('${s.id}')">Demo-Bogen</button>
+          <a href="/api/stacks/${s.id}/pdf" target="_blank">PDF öffnen</a></td>`;
     tb.appendChild(tr);
   }
 }
@@ -194,6 +196,18 @@ async function createStack() {
   window.open(s.pdf_url, "_blank");
   flash("Stapel angelegt – PDF wurde geöffnet. Jetzt drucken und auslegen.");
   loadStacks();
+}
+
+/* ---------- Demo (Workflow-Test ohne Drucker) ---------- */
+async function demoScan(stackId) {
+  try {
+    const r = await api(`/api/stacks/${stackId}/demo`, { method: "POST" });
+    document.querySelector('nav button[data-tab="review"]').click();
+    await openReview(r.response_id);
+    flash(`Demo-Bogen erzeugt – Quad-Score ${r.quad_score.toFixed(3)}. Prüfen & finalisieren.`);
+  } catch (e) {
+    flash("Demo fehlgeschlagen: " + (e.message || e), false);
+  }
 }
 
 /* ---------- Scans ---------- */

@@ -96,6 +96,10 @@ async def upload_scan(file: UploadFile = File(...)):
     image_bytes = await file.read()
     if len(image_bytes) > MAX_UPLOAD_BYTES:
         raise HTTPException(413, "Bild zu groß (max. 25 MB)")
+    return _ingest_scan(image_bytes)
+
+
+def _ingest_scan(image_bytes: bytes) -> dict:
     spec = _active_spec()
     try:
         result = read_scan(image_bytes, spec)
@@ -127,6 +131,29 @@ async def upload_scan(file: UploadFile = File(...)):
         "answers": [vars(a) for a in result.answers],
         "image_url": f"/api/responses/{response_id}/image",
     }
+
+
+# ---------- Demo (Test ohne Drucker/Scanner) ----------
+
+@app.post("/api/stacks/{stack_id}/demo")
+def demo_scan(stack_id: str):
+    """Erzeugt einen synthetisch ausgefüllten, rotierten Bogen und läuft ihn
+    durch die ECHTE Erkennungs-Pipeline – zum Testen des Workflows ohne Hardware.
+    Der Bogen landet (wie ein echter Scan) unfinalisiert im Review."""
+    if not _valid_id(stack_id):
+        raise HTTPException(404, "Stapel nicht gefunden")
+    pdf_path = TEMPLATES_DIR / f"{stack_id}.pdf"
+    if not pdf_path.exists():
+        raise HTTPException(404, "Stapel-PDF nicht gefunden")
+    import numpy as np
+    from .scan.synth import fill_form, render_pdf_to_image, simulate_scan
+    rng = np.random.default_rng()
+    spec = _active_spec()
+    answers = {q.id: (int(rng.integers(0, len(q.answers())))
+                      if rng.random() > 0.15 else None)
+               for q in spec.questions}
+    img = fill_form(render_pdf_to_image(pdf_path.read_bytes()), spec, answers, rng=rng)
+    return _ingest_scan(simulate_scan(img, rng=rng))
 
 
 # ---------- Spec für das Frontend ----------

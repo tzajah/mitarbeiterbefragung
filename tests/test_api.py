@@ -157,3 +157,16 @@ def test_spec_endpoint(client):
     spec = client.get("/api/spec").json()
     assert spec["questions"][0]["answers"]
     assert len(spec["questions"]) == 25
+
+
+def test_demo_scan_lands_in_review(client):
+    stack = client.post("/api/stacks", json={"department": "Demo-Abteilung"}).json()
+    r = client.post(f"/api/stacks/{stack['stack_id']}/demo")
+    assert r.status_code == 200, r.text
+    demo = r.json()
+    assert demo["stack_id"] == stack["stack_id"]
+    assert demo["quad_score"] > 0.9
+    assert len(demo["answers"]) == 25
+    # unfinalisiert → muss in der Review-Liste auftauchen
+    open_rows = client.get("/api/responses?finalized=false").json()
+    assert any(row["id"] == demo["response_id"] for row in open_rows)
