@@ -7,6 +7,9 @@ from pathlib import Path
 
 from .layout import MAX_OPTIONS, MAX_QUESTIONS
 
+# Wert für die explizite "Keine Angabe"-Spalte (KEIN echter Antwortoptionstext)
+NO_ANSWER = "Keine Angabe"
+
 
 @dataclass
 class Question:
@@ -17,7 +20,9 @@ class Question:
     scale_labels: list[str] = field(default_factory=list)  # für scale
 
     def answers(self) -> list[str]:
-        return self.options if self.kind == "choice" else self.scale_labels
+        base = self.options if self.kind == "choice" else self.scale_labels
+        # feste Extra-Spalte "Keine Angabe" gehört zu JEDER Frage
+        return base + [NO_ANSWER]
 
 
 @dataclass

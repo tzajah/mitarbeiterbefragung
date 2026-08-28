@@ -22,11 +22,13 @@ ROW_Y0_MM = 46.0        # y-Zentrum der ersten Fragezeile
 ROW_PITCH_MM = 7.8      # Zeilenabstand
 MAX_QUESTIONS = 30
 
-# Antwort-Bubbles
-BUBBLE_X0_MM = 122.0    # x-Zentrum der ersten Bubble-Spalte
+# Antwort-Bubbles (echte Optionen) + feste Extra-Spalte "Keine Angabe"
+BUBBLE_X0_MM = 110.0    # x-Zentrum der ersten Bubble-Spalte
 BUBBLE_PITCH_MM = 15.5
 BUBBLE_R_MM = 2.6
-MAX_OPTIONS = 5
+MAX_OPTIONS = 5         # echte Antwortoptionen je Frage (Extra-Spalte nicht mitgezählt)
+NO_ANSWER_COL = MAX_OPTIONS  # feste Spaltenposition der Extra-Spalte
+MAX_BUBBLES = MAX_OPTIONS + 1
 
 # QR-Code (Stapel-/Abteilungs-ID), oben rechts
 QR_BOX_MM = (170.0, 10.0, 190.0, 30.0)
@@ -50,9 +52,11 @@ def mark_centers_px(dpi: int = CANONICAL_DPI) -> list[tuple[float, float]]:
     return [(mm_to_px(x, dpi), mm_to_px(y, dpi)) for x, y in MARK_CENTERS_MM]
 
 
-def bubble_centers_mm(row_index: int, n_options: int) -> list[tuple[float, float]]:
+def bubble_centers_mm(row_index: int, n_labels: int) -> list[tuple[float, float]]:
+    """Zentren aller Bubble-Spalten einer Zeile.
+
+    n_labels = Anzahl Spalten INKL. der festen Extra-Spalte 'Keine Angabe'
+    (immer die letzte Position, j = NO_ANSWER_COL)."""
     y = ROW_Y0_MM + row_index * ROW_PITCH_MM
-    return [
-        (BUBBLE_X0_MM + j * BUBBLE_PITCH_MM, y)
-        for j in range(min(n_options, MAX_OPTIONS))
-    ]
+    count = max(2, min(n_labels, MAX_BUBBLES))
+    return [(BUBBLE_X0_MM + j * BUBBLE_PITCH_MM, y) for j in range(count)]

@@ -11,6 +11,7 @@ import io
 import qrcode
 from reportlab.lib.units import mm
 from reportlab.lib.utils import ImageReader
+from reportlab.pdfbase.pdfmetrics import stringWidth
 from reportlab.pdfgen import canvas
 
 from .layout import (
@@ -34,6 +35,16 @@ from .stack_id import qr_payload
 def Y(y_mm_from_top: float) -> float:
     """mm von Seitenoberkante → PDF-y (Punkte, von unten)."""
     return (PAGE_H_MM - y_mm_from_top) * mm
+
+
+def _fit_text(text: str, font: str, size: float, max_width_mm: float) -> str:
+    """Kürzt Text mit Ellipse, damit er exakt in max_width_mm passt."""
+    max_pts = max_width_mm / 25.4 * 72.0
+    if stringWidth(text, font, size) <= max_pts:
+        return text
+    while text and stringWidth(text + "…", font, size) > max_pts:
+        text = text[:-1]
+    return text + "…"
 
 
 def _draw_marks(c: canvas.Canvas) -> None:
@@ -69,8 +80,10 @@ def _draw_bubbles(c: canvas.Canvas, spec: SurveySpec) -> None:
                 c.setFont("Helvetica", 4.6)
                 c.drawCentredString(cx, Y(y_top_mm - 4.2), label[:14])
         c.setFillColorRGB(0, 0, 0)
-        c.setFont("Helvetica", 8)
-        c.drawString(16 * mm, Y(y_top_mm + 2.2), q.text[:95])
+        c.setFont("Helvetica", 7.5)
+        # Textzone endet vor der ersten Bubble-Spalte (110 mm), 6 mm Luft
+        c.drawString(16 * mm, Y(y_top_mm + 2.2),
+                     _fit_text(q.text, "Helvetica", 7.5, 88))
 
 
 def _draw_footer(c: canvas.Canvas, spec: SurveySpec) -> None:
@@ -95,7 +108,8 @@ def render_pdf(spec: SurveySpec, stack_id: str) -> bytes:
     c.drawString(16 * mm, Y(34), spec.title)
     c.setFont("Helvetica", 7)
     c.drawString(16 * mm, Y(39),
-                 "Kreuze in jeder Zeile EINE Antwort an. Weitere Antworten bitte durchstreichen.")
+                 "Kreuze in jeder Zeile EINE Antwort an. Möchtest du zu einer Frage keine "
+                 "Angabe machen, kreuze 'Keine Angabe'.")
     _draw_bubbles(c, spec)
     _draw_footer(c, spec)
     c.showPage()

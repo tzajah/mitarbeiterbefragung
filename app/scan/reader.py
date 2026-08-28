@@ -21,6 +21,7 @@ from ..formgen.layout import (
     mark_centers_px,
     mm_to_px,
 )
+from ..formgen.spec import NO_ANSWER
 from ..formgen.stack_id import parse_payload
 
 # Ink-Dichten (Anteil dunkler Pixel im inneren Bubble-Disk)
@@ -163,7 +164,7 @@ def _read_bubbles(warped_gray: np.ndarray, spec) -> list[AnswerReading]:
     r_in, r_bg = int(round(r * 0.60)), int(round(r * 1.45))
     readings: list[AnswerReading] = []
     for i, q in enumerate(spec.questions):
-        labels = q.answers()
+        labels = q.answers()   # echte Optionen + "Keine Angabe" (letzte Spalte)
         inks = []
         for (xmm, ymm) in bubble_centers_mm(i, len(labels)):
             cx, cy = int(round(mm_to_px(xmm))), int(round(mm_to_px(ymm)))
@@ -172,6 +173,10 @@ def _read_bubbles(warped_gray: np.ndarray, spec) -> list[AnswerReading]:
         amb = [j for j, v in enumerate(inks) if INK_EMPTY < v < INK_FILLED]
         if len(filled) == 1 and not amb:
             j = filled[0]
+            if labels[j] == NO_ANSWER:
+                readings.append(AnswerReading(q.id, NO_ANSWER, 1.0, False,
+                                              "explizit keine Angabe"))
+                continue
             conf = min(1.0, (inks[j] - INK_EMPTY) / (0.75 - INK_EMPTY))
             readings.append(AnswerReading(q.id, labels[j], round(conf, 3),
                                           conf < REVIEW_CONF, ""))
