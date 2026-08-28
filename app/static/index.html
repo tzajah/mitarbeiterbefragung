@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mitarbeiterbefragung</title>
+<style>
+  :root {
+    --bg: #f4f4f2; --card: #ffffff; --ink: #1c1c1c; --muted: #6b6b6b;
+    --accent: #2f6f4f; --danger: #a33; --border: #d9d9d4;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: "Segoe UI", system-ui, sans-serif; background: var(--bg); color: var(--ink); }
+  header { background: var(--card); border-bottom: 1px solid var(--border); padding: 0.7rem 1.2rem; display: flex; align-items: center; gap: 1.5rem; }
+  header h1 { font-size: 1.05rem; margin: 0; }
+  nav button { background: none; border: none; padding: 0.5rem 0.8rem; font-size: 0.95rem; cursor: pointer; color: var(--muted); border-bottom: 2px solid transparent; }
+  nav button.active { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
+  main { max-width: 1100px; margin: 1.2rem auto; padding: 0 1rem; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 1rem 1.2rem; margin-bottom: 1rem; }
+  .row { display: flex; gap: 0.6rem; align-items: center; flex-wrap: wrap; }
+  input[type=text], input[type=number], select { padding: 0.45rem 0.6rem; border: 1px solid var(--border); border-radius: 6px; font-size: 0.95rem; }
+  button.primary { background: var(--accent); color: #fff; border: none; border-radius: 6px; padding: 0.5rem 1rem; font-size: 0.95rem; cursor: pointer; }
+  button.small { padding: 0.3rem 0.7rem; font-size: 0.85rem; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.92rem; }
+  th, td { text-align: left; padding: 0.45rem 0.6rem; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 600; }
+  .badge { display: inline-block; padding: 0.1rem 0.55rem; border-radius: 999px; font-size: 0.78rem; }
+  .badge.ok { background: #e2efe8; color: var(--accent); }
+  .badge.warn { background: #f7e8d5; color: #9a6a1f; }
+  .badge.bad { background: #f6dede; color: var(--danger); }
+  .muted { color: var(--muted); }
+  .review-grid { display: grid; grid-template-columns: minmax(320px, 1fr) 1fr; gap: 1rem; }
+  .review-grid img { width: 100%; border: 1px solid var(--border); border-radius: 6px; }
+  .ans { display: flex; justify-content: space-between; gap: 0.5rem; padding: 0.3rem 0; border-bottom: 1px dashed var(--border); align-items: center; }
+  .ans select { max-width: 55%; }
+  textarea { width: 100%; min-height: 70px; padding: 0.5rem; border: 1px solid var(--border); border-radius: 6px; font: inherit; }
+  .hidden { display: none; }
+  .flash { padding: 0.6rem 0.9rem; border-radius: 6px; margin-bottom: 0.8rem; }
+  .flash.err { background: #f6dede; color: var(--danger); }
+  .flash.ok { background: #e2efe8; color: var(--accent); }
+  .dist { margin: 0.4rem 0 0.8rem; }
+  .bar { display: flex; height: 1.15rem; border-radius: 4px; overflow: hidden; font-size: 0.72rem; color: #fff; }
+  .bar span { display: flex; align-items: center; justify-content: center; white-space: nowrap; overflow: hidden; }
+  .legend { font-size: 0.78rem; color: var(--muted); margin-top: 0.15rem; }
+  .ft { background: #faf9f6; border: 1px solid var(--border); border-radius: 6px; padding: 0.5rem 0.7rem; margin: 0.3rem 0; font-size: 0.92rem; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+<header>
+  <h1>📋 Mitarbeiterbefragung</h1>
+  <nav>
+    <button data-tab="stacks" class="active">Stapel</button>
+    <button data-tab="scans">Scans</button>
+    <button data-tab="review">Review</button>
+    <button data-tab="results">Auswertung</button>
+  </nav>
+</header>
+<main>
+  <div id="flash" class="flash hidden"></div>
+
+  <!-- ============ STAPEL ============ -->
+  <section id="tab-stacks">
+    <div class="card">
+      <h3>Neuen Stapel anlegen</h3>
+      <p class="muted">Ein Stapel gehört zu <b>einer Abteilung</b> und wird dort ausgelegt.
+         Der QR-Code auf dem Bogen kennt nur den Stapel – niemals eine Person.</p>
+      <div class="row">
+        <input type="text" id="dept-name" placeholder="Abteilung, z. B. Produktion Nord">
+        <button class="primary" onclick="createStack()">Stapel drucken (PDF)</button>
+      </div>
+    </div>
+    <div class="card">
+      <h3>Vorhandene Stapel</h3>
+      <table id="stack-table">
+        <thead><tr><th>Abteilung</th><th>erstellt</th><th>finalisierte Antworten</th><th>PDF</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ============ SCANS ============ -->
+  <section id="tab-scans" class="hidden">
+    <div class="card">
+      <h3>Scans hochladen</h3>
+      <p class="muted">Eingescannte Bögen (JPEG/PNG). Die Erkennung läuft lokal – bei unsicheren
+         Markierungen landet der Bogen in der Review-Queue.</p>
+      <input type="file" id="scan-files" accept="image/*" multiple>
+      <button class="primary" onclick="uploadScans()">Hochladen &amp; erkennen</button>
+      <div id="scan-progress" class="muted"></div>
+      <div id="scan-results"></div>
+    </div>
+  </section>
+
+  <!-- ============ REVIEW ============ -->
+  <section id="tab-review" class="hidden">
+    <div class="card" id="review-list-card">
+      <h3>Offene Reviews</h3>
+      <table id="review-table">
+        <thead><tr><th>ID</th><th>Abteilung</th><th>Quad-Score</th><th>offene Felder</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div class="card hidden" id="review-detail">
+      <button class="small" onclick="closeReview()">← zurück zur Liste</button>
+      <div class="review-grid" style="margin-top:0.8rem">
+        <div><img id="review-img" alt="Scan"></div>
+        <div>
+          <div class="row" style="margin-bottom:0.7rem">
+            <label>Abteilung (Stapel):</label>
+            <select id="review-stack"></select>
+          </div>
+          <div id="review-answers"></div>
+          <h4 style="margin-bottom:0.3rem">Freitext</h4>
+          <textarea id="review-freetext" placeholder="Freitext hier abtippen …"></textarea>
+          <div class="row" style="margin-top:0.7rem">
+            <button class="primary" onclick="finalizeReview()">Finalisieren</button>
+            <span class="muted">Danach fließt der Bogen in die Auswertung ein.</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ AUSWERTUNG ============ -->
+  <section id="tab-results" class="hidden">
+    <div class="card">
+      <div class="row">
+        <h3 style="margin:0">Auswertung</h3>
+        <label>k-Anonymität:</label>
+        <input type="number" id="k-input" value="5" min="1" style="width:5rem">
+        <button class="small" onclick="loadResults()">Neu laden</button>
+      </div>
+      <p class="muted">Abteilungen mit weniger als k Antworten werden vollständig
+         unterdrückt (Schutz vor Re-Identifikation durch Ausschluss).</p>
+      <div id="results-body"></div>
+    </div>
+  </section>
+</main>
+
+<script>
+const $ = (sel) => document.querySelector(sel);
+const api = async (path, opts) => {
+  const res = await fetch(path, opts);
+  if (!res.ok) {
+    let msg = res.statusText;
+    try { msg = (await res.json()).detail || msg; } catch (e) {}
+    throw new Error(msg);
+  }
+  return res.json();
+};
+
+function flash(msg, ok = true) {
+  const el = $("#flash");
+  el.textContent = msg;
+  el.className = "flash " + (ok ? "ok" : "err");
+  el.classList.remove("hidden");
+  setTimeout(() => el.classList.add("hidden"), 4000);
+}
+
+document.querySelectorAll("nav button").forEach(btn => {
+  btn.onclick = () => {
+    document.querySelectorAll("nav button").forEach(b => b.classList.remove("active"));
+    btn.classList.add("active");
+    document.querySelectorAll("main > section").forEach(s => s.classList.add("hidden"));
+    $("#tab-" + btn.dataset.tab).classList.remove("hidden");
+    if (btn.dataset.tab === "stacks") loadStacks();
+    if (btn.dataset.tab === "review") loadReviewList();
+    if (btn.dataset.tab === "results") loadResults();
+  };
+});
+
+/* ---------- Stapel ---------- */
+async function loadStacks() {
+  const rows = await api("/api/stacks");
+  const tb = $("#stack-table tbody");
+  tb.innerHTML = "";
+  for (const s of rows) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td>${esc(s.department)}</td><td class="muted">${s.created_at}</td>
+      <td>${s.n}</td><td><a href="/api/stacks/${s.id}/pdf" target="_blank">PDF öffnen</a></td>`;
+    tb.appendChild(tr);
+  }
+}
+
+async function createStack() {
+  const dept = $("#dept-name").value.trim();
+  if (!dept) return flash("Bitte Abteilung angeben", false);
+  const s = await api("/api/stacks", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ department: dept })
+  });
+  $("#dept-name").value = "";
+  window.open(s.pdf_url, "_blank");
+  flash("Stapel angelegt – PDF wurde geöffnet. Jetzt drucken und auslegen.");
+  loadStacks();
+}
+
+/* ---------- Scans ---------- */
+async function uploadScans() {
+  const files = $("#scan-files").files;
+  if (!files.length) return flash("Keine Dateien gewählt", false);
+  const box = $("#scan-results");
+  box.innerHTML = "";
+  for (let i = 0; i < files.length; i++) {
+    $("#scan-progress").textContent = `Datei ${i + 1} von ${files.length} …`;
+    const fd = new FormData();
+    fd.append("file", files[i]);
+    try {
+      const r = await api("/api/scans", { method: "POST", body: fd });
+      const nReview = r.answers.filter(a => a.needs_review && a.value === null).length;
+      box.insertAdjacentHTML("beforeend", `
+        <div class="ans">
+          <span>${esc(files[i].name)}</span>
+          <span>
+            ${r.stack_id ? '<span class="badge ok">Stapel erkannt</span>'
+                         : '<span class="badge warn">Stapel fehlt → Review</span>'}
+            ${nReview ? `<span class="badge warn">${nReview} Feld(er) zu prüfen</span>`
+                      : '<span class="badge ok">lesbar</span>'}
+            <button class="small" onclick="openReview('${r.response_id}')">Review</button>
+          </span>
+        </div>`);
+    } catch (e) {
+      box.insertAdjacentHTML("beforeend",
+        `<div class="ans"><span>${esc(files[i].name)}</span>
+         <span class="badge bad">${esc(String(e.message || e))}</span></div>`);
+    }
+  }
+  $("#scan-progress").textContent = "";
+  $("#scan-files").value = "";
+}
+
+/* ---------- Review ---------- */
+let reviewState = null;
+
+async function loadReviewList() {
+  const rows = await api("/api/responses?finalized=false");
+  const tb = $("#review-table tbody");
+  tb.innerHTML = "";
+  for (const r of rows) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td class="muted">${r.id.slice(0, 8)}…</td>
+      <td>${esc(r.department || "❓ unbekannt")}</td>
+      <td>${(r.quad_score ?? 0).toFixed(3)}</td>
+      <td>${r.n_open}</td>
+      <td><button class="small" onclick="openReview('${r.id}')">öffnen</button></td>`;
+    tb.appendChild(tr);
+  }
+}
+
+async function openReview(id) {
+  const [detail, stacks] = await Promise.all([
+    api("/api/responses/" + id), api("/api/stacks")
+  ]);
+  reviewState = { id, stacks };
+  $("#review-img").src = detail.image_url;
+  const sel = $("#review-stack");
+  sel.innerHTML = "<option value=''>— bitte wählen —</option>" +
+    stacks.map(s => `<option value="${s.id}">${esc(s.department)}</option>`).join("");
+  sel.value = detail.response.stack_id || "";
+  const box = $("#review-answers");
+  box.innerHTML = "";
+  for (const a of detail.answers) {
+    const opts = ["", ...new Set([a.value].filter(Boolean)
+      .concat(detail.answers.map(x => x.value).filter(Boolean)))]
+      .map(v => `<option value="${esc(v)}" ${v === (a.value || "") ? "selected" : ""}>${esc(v) || "(leer)"}</option>`)
+      .join("");
+    box.insertAdjacentHTML("beforeend", `
+      <div class="ans">
+        <span class="muted">${esc(a.question_id)}</span>
+        <span>${a.needs_review ? '<span class="badge warn">prüfen</span>' : ""}</span>
+        <select data-qid="${esc(a.question_id)}">${opts}</select>
+      </div>`);
+  }
+  $("#review-freetext").value = detail.response.free_text || "";
+  $("#review-list-card").classList.add("hidden");
+  $("#review-detail").classList.remove("hidden");
+}
+
+function closeReview() {
+  $("#review-detail").classList.add("hidden");
+  $("#review-list-card").classList.remove("hidden");
+  loadReviewList();
+}
+
+async function finalizeReview() {
+  if (!reviewState) return;
+  const stackId = $("#review-stack").value;
+  if (!stackId) return flash("Bitte Abteilung (Stapel) zuordnen", false);
+  const corrections = {};
+  document.querySelectorAll("#review-answers select").forEach(sel => {
+    corrections[sel.dataset.qid] = sel.value || null;
+  });
+  await api(`/api/responses/${reviewState.id}/finalize`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ stack_id: stackId, free_text: $("#review-freetext").value || null,
+                           corrections })
+  });
+  flash("Bogen finalisiert.");
+  closeReview();
+}
+
+/* ---------- Auswertung ---------- */
+const DIST_COLORS = ["#2f6f4f", "#6aa584", "#a8c8b8", "#d8b26a", "#b0574f", "#888"];
+
+async function loadResults() {
+  const k = parseInt($("#k-input").value || "5", 10);
+  const data = await api("/api/results?k=" + k);
+  const body = $("#results-body");
+  body.innerHTML = "";
+  for (const d of data.departments) {
+    if (d.suppressed) {
+      body.insertAdjacentHTML("beforeend", `
+        <div class="card"><b>${esc(d.department)}</b>
+          <span class="badge bad">unterdrückt</span>
+          <p class="muted">n = ${d.n} &lt; k = ${d.k ?? data.k} – aus Datenschutzgründen keine Auswertung.</p>
+        </div>`);
+      continue;
+    }
+    let html = `<div class="card"><h4>${esc(d.department)} <span class="badge ok">n = ${d.n}</span></h4>`;
+    for (const [qid, dist] of Object.entries(d.distributions || {})) {
+      const entries = Object.entries(dist);
+      const total = entries.reduce((s, [, c]) => s + c, 0) || 1;
+      const bars = entries.map(([v, c], i) =>
+        `<span style="width:${(100 * c / total).toFixed(1)}%;background:${DIST_COLORS[i % DIST_COLORS.length]}">${c}</span>`).join("");
+      const legend = entries.map(([v, c], i) =>
+        `<i style="color:${DIST_COLORS[i % DIST_COLORS.length]}">■</i> ${esc(v)} (${c})`).join(" · ");
+      html += `<div class="dist"><b>${esc(qid)}</b>
+        <div class="bar">${bars}</div><div class="legend">${legend}</div></div>`;
+    }
+    if (d.free_texts && d.free_texts.length) {
+      html += `<h4>Freitexte (${d.free_texts.length})</h4>` +
+        d.free_texts.map(t => `<div class="ft">${esc(t)}</div>`).join("");
+    }
+    body.insertAdjacentHTML("beforeend", html + "</div>");
+  }
+  if (!data.departments.length)
+    body.innerHTML = "<p class='muted'>Noch keine finalisierten Antworten.</p>";
+}
+
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g,
+    c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+loadStacks();
+</script>
+</body>
+</html>

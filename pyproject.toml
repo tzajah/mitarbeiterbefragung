@@ -14,6 +14,7 @@ dependencies = [
     "pillow>=12.3.0",
     "pypdfium2>=5.13.0",
     "pytest>=9.1.1",
+    "python-multipart>=0.0.32",
     "qrcode>=8.2",
     "reportlab>=5.0.1",
     "uvicorn[standard]>=0.52.4",
