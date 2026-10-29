@@ -291,13 +291,27 @@ async function uploadScans() {
   box.innerHTML = "";
   // EIN Upload, damit Seite 2 ihrer Seite 1 zugeordnet werden kann (Reihenfolge zählt)
   const sorted = [...files].sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+  if (sorted.reduce((s, f) => s + f.size, 0) > 100 * 1024 * 1024)
+    return flash("Upload zu groß (max. 100 MB) – bitte in mehreren Teilen hochladen", false);
   const fd = new FormData();
   sorted.forEach(f => fd.append("file", f));
   $("#scan-progress").textContent = `${sorted.length} Datei(en) werden erkannt …`;
   try {
     const r = await api("/api/scans", { method: "POST", body: fd });
-    const pages = r.pages || [{ ...r, name: sorted[0].name, sheet_page: 1 }];
-    pages.forEach(p => box.insertAdjacentHTML("beforeend", scanRow(p)));
+    const pages = r.pages || [{ ...r, name: sorted[0].name, file: sorted[0].name, file_no: 0, sheet_page: 1 }];
+    // je Datei gruppiert: Dateiname, darunter Ergebnis/Fehler je Seite
+    const byFile = new Map();
+    pages.forEach(p => {
+      if (!byFile.has(p.file_no)) byFile.set(p.file_no, { name: p.file, rows: [] });
+      byFile.get(p.file_no).rows.push(p);
+    });
+    for (const f of byFile.values())
+      box.insertAdjacentHTML("beforeend",
+        `<h4>${esc(f.name)}</h4>` + f.rows.map(scanRow).join(""));
+    const ok = pages.filter(p => p.sheet_page === 1).length;
+    const err = pages.filter(p => p.error).length;
+    box.insertAdjacentHTML("beforeend",
+      `<p><b>${ok} Bögen importiert, ${err} Fehler</b></p>`);
   } catch (e) {
     box.insertAdjacentHTML("beforeend",
       `<div class="ans"><span>Upload</span><span class="badge bad">${esc(String(e.message || e))}</span></div>`);
@@ -357,7 +371,8 @@ async function openReview(id) {
   if (detail.image2_url) img2.src = detail.image2_url; else img2.removeAttribute("src");
   const sel = $("#review-stack");
   sel.innerHTML = "<option value=''>— bitte wählen —</option>" +
-    stacks.map(s => `<option value="${s.id}">${esc(s.department)}</option>`).join("");
+    stacks.filter(s => !detail.response.spec_hash || s.spec_hash === detail.response.spec_hash)
+      .map(s => `<option value="${s.id}">${esc(s.department)}</option>`).join("");
   sel.value = detail.response.stack_id || "";
   const box = $("#review-answers");
   box.innerHTML = "";
@@ -412,16 +427,20 @@ async function loadResults() {
   const data = await api("/api/results?k=" + k);
   const body = $("#results-body");
   body.innerHTML = "";
+  const deptCount = {};
+  data.departments.forEach(d => { deptCount[d.department] = (deptCount[d.department] || 0) + 1; });
   for (const d of data.departments) {
+    const label = deptCount[d.department] > 1
+      ? `${d.department} · Fragebogen-Version ${d.version}` : d.department;
     if (d.suppressed) {
       body.insertAdjacentHTML("beforeend", `
-        <div class="card"><b>${esc(d.department)}</b>
+        <div class="card"><b>${esc(label)}</b>
           <span class="badge bad">unterdrückt</span>
           <p class="muted">n = ${d.n} &lt; k = ${d.k ?? data.k} – aus Datenschutzgründen keine Auswertung.</p>
         </div>`);
       continue;
     }
-    let html = `<div class="card"><h4>${esc(d.department)} <span class="badge ok">n = ${d.n}</span></h4>`;
+    let html = `<div class="card"><h4>${esc(label)} <span class="badge ok">n = ${d.n}</span></h4>`;
     const qtext = Object.fromEntries((d.questions || []).map(q => [q.id, q.text]));
     for (const [qid, dist] of Object.entries(d.distributions || {})) {
       const entries = Object.entries(dist);

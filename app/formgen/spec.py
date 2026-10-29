@@ -1,6 +1,7 @@
 """Bogen-Spezifikation (Fragen) – Teil des Formular-Templates."""
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from dataclasses import dataclass, field
@@ -101,6 +102,15 @@ class SurveySpec:
             raise ValueError("Akzentfarbe muss im Format #RRGGBB sein")
         compute_layout(spec)  # wirft, wenn der Bogen nicht auf eine Seite passt
         return spec
+
+    def fingerprint(self) -> str:
+        """Identität des Fragebogens (Fragen, Antworten, Freitext-Frage) – bewusst ohne
+        Design-Felder, damit reine Optik-Änderungen keine neue Version ergeben."""
+        canon = {"free_text_prompt": self.free_text_prompt,
+                 "questions": [{"id": q.id, "text": q.text, "answers": q.answers()}
+                               for q in self.questions]}
+        return hashlib.sha256(json.dumps(canon, ensure_ascii=False, sort_keys=True,
+                                         separators=(",", ":")).encode("utf-8")).hexdigest()
 
     def save(self, path: Path) -> None:
         path.write_text(json.dumps(self.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")

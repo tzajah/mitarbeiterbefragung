@@ -389,10 +389,10 @@ def test_single_pages(client):
     only1 = client.post("/api/scans", files={"file": ("s1.jpg", s1, "image/jpeg")}).json()
     assert {a["question_id"]: a["value"] for a in only1["answers"]} == truth
     assert "keine Freitextseite gefunden" in only1["warnings"] and only1["image2_url"] is None
-    # mehrere Bilddateien in EINEM Upload werden wie Duplex-Seiten gepaart
+    # getrennte Bilddateien werden NICHT gepaart (Paarung nur innerhalb einer Datei)
     both = client.post("/api/scans", files=[("file", ("a.jpg", s1, "image/jpeg")),
                                             ("file", ("b.jpg", s2, "image/jpeg"))]).json()
-    assert both["pages"][0]["image2_url"]
+    assert both["pages"][0]["image2_url"] is None and "error" in both["pages"][1]
 
 
 def test_logo_upload_and_preview(client):
@@ -430,3 +430,167 @@ def test_spec_design_fields_and_fit(client):
     mixed = [q | {"scale_labels": ["ja", "nein"]} if i % 2 else q for i, q in enumerate(one_set)]
     bad = client.put("/api/spec", json=body | {"questions": mixed})
     assert bad.status_code == 422 and "passt nicht auf eine Seite" in bad.json()["detail"]
+
+
+# ---------- Review-Findings: Versionen, Upload-Limit, NULL-Stapel, Seitenfehler ----------
+
+def _upload_finalize(client, stack, pdf, rng, spec=None, free_text=None):
+    scan, _ = _make_scan_for_stack(pdf, rng, spec)
+    up = client.post("/api/scans", files={"file": ("s.jpg", scan, "image/jpeg")}).json()
+    fin = client.post(f"/api/responses/{up['response_id']}/finalize",
+                      json={"stack_id": stack["stack_id"], "free_text": free_text})
+    assert fin.status_code == 200, fin.text
+    return up
+
+
+def test_k_anonymity_per_questionnaire_version(client):
+    rng = np.random.default_rng(41)
+    old_stack = client.post("/api/stacks", json={"department": "IT"}).json()
+    old_pdf = client.get(old_stack["pdf_url"]).content
+    for _ in range(4):
+        _upload_finalize(client, old_stack, old_pdf, rng)
+    body = _custom_body()
+    assert client.put("/api/spec", json=body).status_code == 200
+    new_stack = client.post("/api/stacks", json={"department": "IT"}).json()
+    new_pdf = client.get(new_stack["pdf_url"]).content
+    from app.formgen.spec import SurveySpec
+    _upload_finalize(client, new_stack, new_pdf, rng,
+                     SurveySpec.from_dict(client.get("/api/spec").json()), "geheim")
+    deps = client.get("/api/results?k=5").json()["departments"]
+    assert len(deps) == 2 and sorted(d["n"] for d in deps) == [1, 4]
+    assert all(d["suppressed"] for d in deps), "4 alt + 1 neu darf k=5 nicht erfüllen"
+    assert all("free_texts" not in d and d["version"] for d in deps)
+
+
+def test_optics_change_keeps_fingerprint(client):
+    a = client.get("/api/spec").json()
+    from app.formgen.spec import SurveySpec
+    s1 = SurveySpec.from_dict(a)
+    s2 = SurveySpec.from_dict(a | {"title": "anders", "accent_color": "#123456"})
+    assert s1.fingerprint() == s2.fingerprint()
+    s3 = SurveySpec.from_dict(a | {"free_text_prompt": "etwas anderes?"})
+    assert s1.fingerprint() != s3.fingerprint()
+
+
+def test_finalize_rejects_other_questionnaire(client):
+    rng = np.random.default_rng(42)
+    s_old = client.post("/api/stacks", json={"department": "IT"}).json()
+    pdf = client.get(s_old["pdf_url"]).content
+    client.put("/api/spec", json=_custom_body())
+    s_new = client.post("/api/stacks", json={"department": "IT"}).json()
+    rows = {r["id"]: r for r in client.get("/api/stacks").json()}
+    assert rows[s_old["stack_id"]]["spec_hash"] != rows[s_new["stack_id"]]["spec_hash"]
+    scan, _ = _make_scan_for_stack(pdf, rng)
+    up = client.post("/api/scans", files={"file": ("s.jpg", scan, "image/jpeg")}).json()
+    detail = client.get(f"/api/responses/{up['response_id']}").json()
+    assert detail["response"]["spec_hash"] == rows[s_old["stack_id"]]["spec_hash"]
+    bad = client.post(f"/api/responses/{up['response_id']}/finalize",
+                      json={"stack_id": s_new["stack_id"]})
+    assert bad.status_code == 409 and "anderen Fragebogen" in bad.json()["detail"]
+
+
+def test_upload_total_limit(client, monkeypatch):
+    import app.main as main_mod
+    monkeypatch.setattr(main_mod, "MAX_UPLOAD_BYTES", 1000)
+    r = client.post("/api/scans", files=[("file", ("a.jpg", b"x" * 600, "image/jpeg")),
+                                         ("file", ("b.jpg", b"x" * 600, "image/jpeg"))])
+    assert r.status_code == 413 and "max. 100 MB" in r.json()["detail"]
+
+
+def test_init_db_migrates_old_schema(tmp_path, monkeypatch):
+    import sqlite3
+    import app.db as db_mod
+    path = tmp_path / "old.db"
+    monkeypatch.setattr(db_mod, "DB_PATH", path)
+    con = sqlite3.connect(path)
+    con.executescript("""
+        CREATE TABLE stacks (id TEXT PRIMARY KEY, department TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')));
+        CREATE TABLE responses (id TEXT PRIMARY KEY, stack_id TEXT NOT NULL REFERENCES stacks(id),
+            quad_score REAL, finalized INTEGER NOT NULL DEFAULT 0, free_text TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')));
+        CREATE TABLE answers (response_id TEXT NOT NULL REFERENCES responses(id) ON DELETE CASCADE,
+            question_id TEXT NOT NULL, value TEXT, confidence REAL,
+            needs_review INTEGER NOT NULL DEFAULT 0, note TEXT,
+            source TEXT NOT NULL DEFAULT 'auto', PRIMARY KEY (response_id, question_id));
+        INSERT INTO stacks (id, department) VALUES ('s1', 'IT');
+        INSERT INTO responses (id, stack_id, finalized, free_text) VALUES ('r1', 's1', 1, 'hi');
+        INSERT INTO answers (response_id, question_id, value) VALUES ('r1', 'q01', 'ja');
+    """)
+    con.commit()
+    con.close()
+    for _ in range(2):  # idempotent
+        db_mod.init_db()
+        with db_mod.get_db() as db:
+            assert db.execute("SELECT free_text FROM responses").fetchone()[0] == "hi"
+            assert db.execute("SELECT value FROM answers").fetchone()[0] == "ja"
+            db.execute("INSERT INTO responses (id, stack_id, spec_hash) VALUES ('r2', NULL, 'h')")
+            db.execute("DELETE FROM responses WHERE id = 'r2'")
+            assert db.execute("SELECT spec_hash FROM stacks").fetchone()[0] is None
+
+
+def test_unreadable_qr_stored_unassigned(client):
+    from app.formgen.layout import QR_BOX_MM, mm_to_px
+    rng = np.random.default_rng(43)
+    stack = client.post("/api/stacks", json={"department": "IT"}).json()
+    pdf = client.get(stack["pdf_url"]).content
+    img = render_pdf_to_image(pdf)
+    dpi = 150
+    x0, y0, x1, y1 = (int(v / 25.4 * dpi) for v in QR_BOX_MM)
+    img = fill_form(img, default_spec(), {q.id: 0 for q in default_spec().questions}, rng=rng)
+    img[y0 - 3:y1 + 3, x0 - 3:x1 + 3] = 255  # QR übermalen
+    bad = simulate_scan(img, rng=rng)
+    good, _ = _make_scan_for_stack(pdf, rng)
+    r = client.post("/api/scans", files=[("file", ("bad.jpg", bad, "image/jpeg")),
+                                         ("file", ("good.jpg", good, "image/jpeg"))])
+    assert r.status_code == 200, r.text
+    p = r.json()["pages"]
+    assert p[0]["stack_id"] is None and p[0]["response_id"]
+    assert "QR-Code nicht lesbar" in p[0]["warnings"][0]
+    assert p[1]["stack_id"] == stack["stack_id"]
+    detail = client.get(f"/api/responses/{p[0]['response_id']}").json()
+    assert detail["response"]["spec_hash"]
+    assert client.post(f"/api/responses/{p[0]['response_id']}/finalize", json={}).status_code == 400
+
+
+def test_broken_pdf_page_does_not_abort(client, monkeypatch):
+    import pypdfium2 as pdfium
+    rng = np.random.default_rng(44)
+    stack = client.post("/api/stacks", json={"department": "IT"}).json()
+    pdf = client.get(stack["pdf_url"]).content
+    a1, a2, _ = _sheet_scans(pdf, rng)
+    b1, b2, _ = _sheet_scans(pdf, rng)
+    orig, calls = pdfium.PdfPage.render, []
+
+    def flaky(self, *a, **kw):
+        calls.append(1)
+        if len(calls) == 2:
+            raise pdfium.PdfiumError("kaputte Seite")
+        return orig(self, *a, **kw)
+
+    monkeypatch.setattr(pdfium.PdfPage, "render", flaky)
+    up = client.post("/api/scans", files={"file": ("s.pdf", _pdf_of([a1, a2, b1, b2]),
+                                                   "application/pdf")})
+    assert up.status_code == 200, up.text
+    pages = up.json()["pages"]
+    assert "error" in pages[1] and pages[0]["response_id"]
+    assert pages[2]["sheet_page"] == 1 and pages[3]["sheet_page"] == 2
+
+
+def test_many_pdfs_pair_only_within_file(client):
+    rng = np.random.default_rng(45)
+    stack = client.post("/api/stacks", json={"department": "IT"}).json()
+    pdf = client.get(stack["pdf_url"]).content
+    files, s2_alone = [], None
+    for i in range(3):
+        s1, s2, _ = _sheet_scans(pdf, rng)
+        files.append(("file", (f"b{i}.pdf", _pdf_of([s1, s2]), "application/pdf")))
+        s2_alone = s2
+    files.append(("file", ("nur2.pdf", _pdf_of([s2_alone]), "application/pdf")))
+    up = client.post("/api/scans", files=files)
+    assert up.status_code == 200, up.text
+    pages = up.json()["pages"]
+    ok = [p for p in pages if p.get("sheet_page") == 1]
+    assert len(ok) == 3 and all(p["image2_url"] for p in ok)
+    errs = [p for p in pages if "error" in p]
+    assert len(errs) == 1 and errs[0]["file"] == "nur2.pdf" and errs[0]["file_no"] == 3

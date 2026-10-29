@@ -8,6 +8,8 @@ from contextlib import asynccontextmanager
 from functools import partial
 from pathlib import Path
 
+import cv2
+from PIL import Image
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -22,9 +24,9 @@ from .formgen.spec import (DEFAULT_ACCENT, DEFAULT_INTRO, DEFAULT_ORG_TITLE, HEX
                            NO_ANSWER, Question, SurveySpec, default_spec)
 from .scan.reader import read_scan
 
-MAX_UPLOAD_BYTES = 25 * 1024 * 1024       # je Bilddatei
-MAX_PDF_BYTES = 100 * 1024 * 1024         # je PDF (Stapelscan vieler Bögen)
-MAX_SCAN_PAGES = 200                      # Seiten je Upload
+MAX_UPLOAD_BYTES = 100 * 1024 * 1024       # Summe aller Dateien je Request (und je Datei)
+UPLOAD_TOO_BIG = "Upload zu groß (max. 100 MB) – bitte in mehreren Teilen hochladen"
+MAX_SCAN_PAGES = 1000                     # Seiten je Upload
 SCAN_PDF_DPI = 200                        # = CANONICAL_DPI, mehr bringt der Erkennung nichts
 MAX_LOGO_BYTES = 2 * 1024 * 1024
 MAX_LOGO_PIXELS = 25_000_000              # Decompression-Bomb-Schutz
@@ -82,6 +84,13 @@ def _stack_spec(stack_id: str | None) -> SurveySpec:
     return _active_spec()
 
 
+def _backfill_hashes(db) -> None:
+    """Altbestand: Fingerprint aus Snapshot bzw. Standard-Spec nachtragen."""
+    for r in db.execute("SELECT id FROM stacks WHERE spec_hash IS NULL").fetchall():
+        db.execute("UPDATE stacks SET spec_hash = ? WHERE id = ?",
+                   (_stack_spec(r["id"]).fingerprint(), r["id"]))
+
+
 def _spec_dict(spec: SurveySpec) -> dict:
     d = spec.to_dict()
     for q, qd in zip(spec.questions, d["questions"]):
@@ -107,8 +116,8 @@ def create_stack(body: StackCreate):
     pdf_path.write_bytes(pdf)
     spec.save(TEMPLATES_DIR / f"{stack_id}.json")  # Snapshot: Stapel behält seine Fragen
     with get_db() as db:
-        db.execute("INSERT INTO stacks (id, department) VALUES (?, ?)",
-                   (stack_id, dept))
+        db.execute("INSERT INTO stacks (id, department, spec_hash) VALUES (?, ?, ?)",
+                   (stack_id, dept, spec.fingerprint()))
     return {"stack_id": stack_id, "department": dept,
             "pdf_url": f"/api/stacks/{stack_id}/pdf"}
 
@@ -116,8 +125,9 @@ def create_stack(body: StackCreate):
 @app.get("/api/stacks")
 def list_stacks():
     with get_db() as db:
+        _backfill_hashes(db)
         rows = db.execute("""
-            SELECT s.id, s.department, s.created_at,
+            SELECT s.id, s.department, s.created_at, s.spec_hash,
                    (SELECT COUNT(*) FROM responses r
                      WHERE r.stack_id = s.id AND r.finalized = 1) AS n
             FROM stacks s ORDER BY s.created_at DESC
@@ -146,13 +156,16 @@ def _as_jpeg(image_bytes: bytes) -> bytes:
     return cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 90])[1].tobytes()
 
 
-def _pdf_pages(data: bytes, name: str) -> list:
+def _pdf_pages(data: bytes, name: str, max_pages: int) -> list:
     """PDF → [(Bezeichnung, Lader)]; gerendert wird erst beim Verarbeiten der Seite."""
     import pypdfium2 as pdfium
     try:
         doc = pdfium.PdfDocument(data)
     except pdfium.PdfiumError:
         raise HTTPException(422, f"{name}: PDF konnte nicht geöffnet werden")
+
+    if len(doc) > max_pages:  # vor dem Anlegen der Seiteneinträge prüfen
+        raise HTTPException(413, f"Zu viele Seiten (max. {MAX_SCAN_PAGES} je Upload)")
 
     def render(i: int) -> bytes:
         page = doc[i]
@@ -165,28 +178,30 @@ def _pdf_pages(data: bytes, name: str) -> list:
     return [(f"{name} – Seite {i + 1}", partial(render, i)) for i in range(len(doc))]
 
 
+
 @app.post("/api/scans")
 async def upload_scan(file: list[UploadFile] = File(...)):
     """Ein oder mehrere Bilder und/oder PDFs (jede PDF-Seite = ein Blatt).
 
     Reihenfolge zählt: Eine Freitextseite (2) gehört zur unmittelbar vorangehenden
-    Fragenseite (1) desselben Stapels (Duplex-Scan: S1, S2, S1, S2 …).
+    Fragenseite (1) desselben Stapels IN DERSELBEN DATEI (S1, S2, S1, S2 …).
     Antwort: bei genau EINEM Bild wie bisher das Ergebnis-Objekt (Fehler → HTTP 422),
     sonst {"pages": [...]} mit Ergebnis oder "error" je Seite."""
     pages = []
     single_image = len(file) == 1
-    for f in file:
+    remaining = MAX_UPLOAD_BYTES
+    for file_no, f in enumerate(file):
         name = f.filename or "Datei"
-        data = await f.read(MAX_PDF_BYTES + 1)
+        data = await f.read(remaining + 1)  # bricht beim Einlesen ab, sobald die Summe reißt
+        remaining -= len(data)
+        if remaining < 0:
+            raise HTTPException(413, UPLOAD_TOO_BIG)
         if data[:5] == b"%PDF-":
             single_image = False
-            if len(data) > MAX_PDF_BYTES:
-                raise HTTPException(413, f"{name}: PDF zu groß (max. 100 MB)")
-            pages += _pdf_pages(data, name)
+            pages += [(n, ld, file_no, name)
+                      for n, ld in _pdf_pages(data, name, MAX_SCAN_PAGES - len(pages))]
         else:
-            if len(data) > MAX_UPLOAD_BYTES:
-                raise HTTPException(413, f"{name}: Bild zu groß (max. 25 MB)")
-            pages.append((name, partial(bytes, data)))
+            pages.append((name, partial(bytes, data), file_no, name))
         if len(pages) > MAX_SCAN_PAGES:
             raise HTTPException(413, f"Zu viele Seiten (max. {MAX_SCAN_PAGES} je Upload)")
     results = _ingest_pages(pages)
@@ -201,13 +216,23 @@ async def upload_scan(file: list[UploadFile] = File(...)):
 def _ingest_pages(pages: list) -> list[dict]:
     out: list[dict] = []
     open_p1: tuple[str | None, dict] | None = None  # (QR-Stapel, Ergebnis) der letzten Seite 1
-    for n, (name, load) in enumerate(pages, 1):
-        entry = {"page": n, "name": name}
+    prev_file = None
+    for n, (name, load, file_no, file_name) in enumerate(pages, 1):
+        entry = {"page": n, "name": name, "file": file_name, "file_no": file_no}
+        if file_no != prev_file:  # Seitenpaarung nur innerhalb einer Datei
+            open_p1 = None
+            prev_file = file_no
         try:
             image_bytes = load()
+            pages[n - 1] = None  # Referenz auf Rohdaten/PDF freigeben
             result = read_scan(image_bytes, _stack_spec)
         except ValueError as e:
             out.append({**entry, "error": str(e)})
+            open_p1 = None
+            continue
+        except (RuntimeError, OSError, cv2.error, Image.DecompressionBombError) as e:
+            # z. B. PdfiumError (RuntimeError) bei beschädigter PDF-Seite, PIL-Fehler
+            out.append({**entry, "error": f"Seite konnte nicht gelesen werden: {e}"})
             open_p1 = None
             continue
         if result.page == 2:
@@ -233,13 +258,20 @@ def _store_response(result, image_bytes: bytes) -> dict:
     response_id = uuid.uuid4().hex
     stack_id = result.stack_id
     with get_db() as db:
+        spec_hash = None
         if stack_id:
-            known = db.execute("SELECT 1 FROM stacks WHERE id = ?", (stack_id,)).fetchone()
-            if not known:
+            _backfill_hashes(db)
+            known = db.execute("SELECT spec_hash FROM stacks WHERE id = ?",
+                               (stack_id,)).fetchone()
+            if known:
+                spec_hash = known["spec_hash"]
+            else:
                 stack_id = None  # unbekannter Stapel → manuell zuordnen
+        if spec_hash is None:  # der Reader hat mit der aktiven Spec gelesen
+            spec_hash = _active_spec().fingerprint()
         db.execute(
-            "INSERT INTO responses (id, stack_id, quad_score) VALUES (?, ?, ?)",
-            (response_id, stack_id, result.quad_score))
+            "INSERT INTO responses (id, stack_id, quad_score, spec_hash) VALUES (?, ?, ?, ?)",
+            (response_id, stack_id, result.quad_score, spec_hash))
         for a in result.answers:
             db.execute(
                 "INSERT INTO answers (response_id, question_id, value, confidence,"
@@ -282,7 +314,7 @@ def demo_scan(stack_id: str):
     scans = [simulate_scan(fill_form(render_pdf_to_image(pdf), spec, answers, rng=rng), rng=rng)]
     if len(pdfium.PdfDocument(pdf)) > 1:  # Altbestand ist einseitig
         scans.append(simulate_scan(scribble(render_pdf_to_image(pdf, page=1), rng), rng=rng))
-    r = _ingest_pages([(f"Demo S{i + 1}", partial(bytes, s)) for i, s in enumerate(scans)])[0]
+    r = _ingest_pages([(f"Demo S{i + 1}", partial(bytes, s), 0, "Demo") for i, s in enumerate(scans)])[0]
     if "error" in r:
         raise HTTPException(422, r["error"])
     return r
@@ -489,7 +521,7 @@ def finalize_response(response_id: str, body: FinalizeBody):
     if not _valid_id(response_id):
         raise HTTPException(404, "Antwort nicht gefunden")
     with get_db() as db:
-        row = db.execute("SELECT finalized FROM responses WHERE id = ?",
+        row = db.execute("SELECT finalized, stack_id, spec_hash FROM responses WHERE id = ?",
                          (response_id,)).fetchone()
         if not row:
             raise HTTPException(404, "Antwort nicht gefunden")
@@ -497,8 +529,18 @@ def finalize_response(response_id: str, body: FinalizeBody):
             raise HTTPException(409, "Bogen ist bereits finalisiert")
         if not body.stack_id:
             raise HTTPException(400, "Stapel-Zuordnung fehlt (Abteilung)")
-        if not db.execute("SELECT 1 FROM stacks WHERE id = ?", (body.stack_id,)).fetchone():
+        _backfill_hashes(db)
+        target = db.execute("SELECT spec_hash FROM stacks WHERE id = ?",
+                            (body.stack_id,)).fetchone()
+        if not target:
             raise HTTPException(400, "Unbekannter Stapel")
+        read_hash = row["spec_hash"]
+        if not read_hash and row["stack_id"]:  # Altbestand ohne Hash
+            read_hash = db.execute("SELECT spec_hash FROM stacks WHERE id = ?",
+                                   (row["stack_id"],)).fetchone()["spec_hash"]
+        if read_hash and read_hash != target["spec_hash"]:
+            raise HTTPException(409, "Dieser Stapel hat einen anderen Fragebogen – "
+                                     "Scan passt nicht")
         valid_values = {q.id: set(q.answers()) for q in _stack_spec(body.stack_id).questions}
         for qid, value in body.corrections.items():
             if qid not in valid_values:
@@ -523,38 +565,43 @@ def results(k: int = K_DEFAULT):
     # Schutz vor versehentlicher De-Anonymisierung: k wird auf [K_MIN, K_MAX] geklemmt
     k = max(K_MIN, min(K_MAX, k))
     with get_db() as db:
-        departments = db.execute("""
-            SELECT st.department AS dept, COUNT(*) AS n
+        _backfill_hashes(db)
+        # Gruppe = (Abteilung, Fragebogen-Fingerprint): nur gleiche Fragen werden aggregiert
+        groups = db.execute("""
+            SELECT st.department AS dept, st.spec_hash AS h, COUNT(*) AS n,
+                   MIN(st.created_at) AS since
             FROM responses r JOIN stacks st ON st.id = r.stack_id
-            WHERE r.finalized = 1 GROUP BY st.department
+            WHERE r.finalized = 1 GROUP BY st.department, st.spec_hash
+            ORDER BY st.department, since
         """).fetchall()
         out = []
-        for d in departments:
-            n = d["n"]
-            entry = {"department": d["dept"], "n": n,
-                     "suppressed": n < max(k, 1)}
+        for g in groups:
+            n = g["n"]
+            entry = {"department": g["dept"], "version": f"{g['h'][:8]} · {g['since'][:10]}",
+                     "n": n, "suppressed": n < max(k, 1)}
             if not entry["suppressed"]:
                 latest = db.execute(
-                    "SELECT id FROM stacks WHERE department = ?"
-                    " ORDER BY created_at DESC, rowid DESC LIMIT 1", (d["dept"],)).fetchone()
+                    "SELECT id FROM stacks WHERE department = ? AND spec_hash = ?"
+                    " ORDER BY created_at DESC, rowid DESC LIMIT 1",
+                    (g["dept"], g["h"])).fetchone()
                 entry["questions"] = [{"id": q.id, "text": q.text}
                                       for q in _stack_spec(latest["id"]).questions]
                 rows = db.execute("""
                     SELECT a.question_id, a.value, COUNT(*) AS c
                     FROM answers a JOIN responses r ON r.id = a.response_id
                     JOIN stacks st ON st.id = r.stack_id
-                    WHERE r.finalized = 1 AND st.department = ?
+                    WHERE r.finalized = 1 AND st.department = ? AND st.spec_hash = ?
                     GROUP BY a.question_id, a.value
-                """, (d["dept"],)).fetchall()
+                """, (g["dept"], g["h"])).fetchall()
                 dist: dict[str, dict[str, int]] = {}
                 for r in rows:
                     dist.setdefault(r["question_id"], {})[r["value"] or "(keine Antwort)"] = r["c"]
                 fts = db.execute("""
                     SELECT r.free_text FROM responses r
                     JOIN stacks st ON st.id = r.stack_id
-                    WHERE r.finalized = 1 AND st.department = ?
+                    WHERE r.finalized = 1 AND st.department = ? AND st.spec_hash = ?
                       AND r.free_text IS NOT NULL AND TRIM(r.free_text) != ''
-                """, (d["dept"],)).fetchall()
+                """, (g["dept"], g["h"])).fetchall()
                 entry["distributions"] = dist
                 entry["free_texts"] = [f["free_text"] for f in fts]
             out.append(entry)
