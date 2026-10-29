@@ -2,13 +2,21 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .layout import MAX_OPTIONS, MAX_QUESTIONS
+from .layout import LAYOUT_VERSION, MAX_OPTIONS, MAX_QUESTIONS, compute_layout
 
 # Wert für die explizite "Keine Angabe"-Spalte (KEIN echter Antwortoptionstext)
 NO_ANSWER = "Keine Angabe"
+
+DEFAULT_ORG_TITLE = "BETRIEBSRAT"
+DEFAULT_ACCENT = "#00965E"
+DEFAULT_INTRO = ("Kreuze in jeder Zeile EINE Antwort an. Möchtest du zu einer Frage keine "
+                 "Angabe machen, kreuze „Keine Angabe“. Bitte keinen Namen angeben – "
+                 "Rückgabe in den Sammelkasten deiner Abteilung.")
+HEX_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 
 
 @dataclass
@@ -19,10 +27,12 @@ class Question:
     options: list[str] = field(default_factory=list)   # für choice
     scale_labels: list[str] = field(default_factory=list)  # für scale
 
+    def real_options(self) -> list[str]:
+        return self.options if self.kind == "choice" else self.scale_labels
+
     def answers(self) -> list[str]:
-        base = self.options if self.kind == "choice" else self.scale_labels
         # feste Extra-Spalte "Keine Angabe" gehört zu JEDER Frage
-        return base + [NO_ANSWER]
+        return self.real_options() + [NO_ANSWER]
 
 
 @dataclass
@@ -30,11 +40,21 @@ class SurveySpec:
     title: str
     questions: list[Question]
     free_text_prompt: str = "Was soll sich in deiner Abteilung verbessern?"
+    org_title: str = DEFAULT_ORG_TITLE
+    org_subtitle: str = ""
+    accent_color: str = DEFAULT_ACCENT
+    intro: str = DEFAULT_INTRO
+    layout_version: int = LAYOUT_VERSION
 
     def to_dict(self) -> dict:
         return {
             "title": self.title,
             "free_text_prompt": self.free_text_prompt,
+            "org_title": self.org_title,
+            "org_subtitle": self.org_subtitle,
+            "accent_color": self.accent_color,
+            "intro": self.intro,
+            "layout_version": self.layout_version,
             "questions": [
                 {
                     "id": q.id,
@@ -62,13 +82,25 @@ class SurveySpec:
         if not (1 <= len(qs) <= MAX_QUESTIONS):
             raise ValueError(f"1–{MAX_QUESTIONS} Fragen erlaubt, got {len(qs)}")
         for q in qs:
-            if not (2 <= len(q.answers()) <= MAX_OPTIONS):
+            if q.kind not in ("scale", "choice"):
+                raise ValueError(f"Frage {q.id}: Typ muss scale oder choice sein")
+            if not (2 <= len(q.real_options()) <= MAX_OPTIONS):
                 raise ValueError(f"Frage {q.id}: 2–{MAX_OPTIONS} Antwortoptionen")
-        return cls(
+        spec = cls(
             title=d.get("title", "Mitarbeiterbefragung"),
             questions=qs,
-            free_text_prompt=d.get("free_text_prompt", cls("").free_text_prompt),
+            free_text_prompt=d.get("free_text_prompt", cls("", []).free_text_prompt),
+            org_title=d.get("org_title", DEFAULT_ORG_TITLE),
+            org_subtitle=d.get("org_subtitle", ""),
+            accent_color=d.get("accent_color", DEFAULT_ACCENT),
+            intro=d.get("intro", DEFAULT_INTRO),
+            # fehlt im Snapshot → Altbestand, gedruckt im alten festen Layout
+            layout_version=int(d.get("layout_version", 1)),
         )
+        if not HEX_RE.match(spec.accent_color):
+            raise ValueError("Akzentfarbe muss im Format #RRGGBB sein")
+        compute_layout(spec)  # wirft, wenn der Bogen nicht auf eine Seite passt
+        return spec
 
     def save(self, path: Path) -> None:
         path.write_text(json.dumps(self.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")

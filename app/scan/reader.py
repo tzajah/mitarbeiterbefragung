@@ -1,7 +1,8 @@
 """Scan-Pipeline: Eckmarken finden → entzerren → Bubbles lesen → QR dekodieren.
 
 Voll deterministisch (kein ML), CPU-only. Alle Geometrie kommt aus
-app.formgen.layout – Generator und Reader teilen sich dieselben Konstanten.
+app.formgen.layout.compute_layout – Generator und Reader teilen dieselbe Geometrie.
+Bubbles werden nur auf Seite 1 gelesen; Seite 2 (Freitext) wird nur entzerrt + QR.
 """
 from __future__ import annotations
 
@@ -12,12 +13,11 @@ import cv2
 import numpy as np
 
 from ..formgen.layout import (
-    BUBBLE_R_MM,
     CANONICAL_DPI,
     MARK_SIZE_MM,
     PAGE_W_MM,
-    bubble_centers_mm,
     canonical_size_px,
+    compute_layout,
     mark_centers_px,
     mm_to_px,
 )
@@ -47,6 +47,7 @@ class ReadResult:
     quad_score: float
     answers: list[AnswerReading]
     warnings: list[str]
+    page: int = 1           # 1 = Fragen, 2 = Freitext (aus dem QR; unlesbar → 1)
 
     @property
     def needs_review(self) -> bool:
@@ -86,7 +87,8 @@ def _mark_candidates(bw: np.ndarray) -> list[tuple[float, np.ndarray]]:
         score = fill * (1.0 - abs(w - h) / max(w, h))
         cands.append((score, np.array([x + w / 2.0, y + h / 2.0], dtype=np.float32)))
     cands.sort(key=lambda t: -t[0])
-    return cands[:14]
+    # großzügig: dunkle Quadrate im Logo dürfen die echten Marken nicht verdrängen
+    return cands[:20]
 
 
 def _select_quad(cands: list[tuple[float, np.ndarray]], shape: tuple[int, int]) -> tuple[np.ndarray, float] | None:
@@ -160,13 +162,14 @@ def _disk_ink(warped_gray: np.ndarray, cx: int, cy: int, r_in: int, r_bg: int) -
 
 
 def _read_bubbles(warped_gray: np.ndarray, spec) -> list[AnswerReading]:
-    r = mm_to_px(BUBBLE_R_MM)
+    lay = compute_layout(spec)
+    r = mm_to_px(lay.bubble_r)
     r_in, r_bg = int(round(r * 0.60)), int(round(r * 1.45))
     readings: list[AnswerReading] = []
-    for i, q in enumerate(spec.questions):
+    for q, row in zip(spec.questions, lay.rows):
         labels = q.answers()   # echte Optionen + "Keine Angabe" (letzte Spalte)
         inks = []
-        for (xmm, ymm) in bubble_centers_mm(i, len(labels)):
+        for (xmm, ymm) in row.bubbles:
             cx, cy = int(round(mm_to_px(xmm))), int(round(mm_to_px(ymm)))
             inks.append(_disk_ink(warped_gray, cx, cy, r_in, r_bg))
         filled = [j for j, v in enumerate(inks) if v >= INK_FILLED]
@@ -192,7 +195,10 @@ def _read_bubbles(warped_gray: np.ndarray, spec) -> list[AnswerReading]:
 
 
 def read_scan(image_bytes: bytes, spec) -> ReadResult:
-    """Hauptfunktion: Scan-Bild (JPEG/PNG) → strukturierte, bewertete Antworten."""
+    """Hauptfunktion: Scan-Bild (JPEG/PNG) → strukturierte, bewertete Antworten.
+
+    spec: SurveySpec ODER Funktion stack_id (None = unbekannt) → SurveySpec;
+    so wird erst der Stapel aus dem QR bestimmt und dann mit dessen Spec gelesen."""
     buf = np.frombuffer(image_bytes, dtype=np.uint8)
     original = cv2.imdecode(buf, cv2.IMREAD_COLOR)
     if original is None:
@@ -210,15 +216,17 @@ def read_scan(image_bytes: bytes, spec) -> ReadResult:
     warped = _warp(original, quad)
     warped_gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
 
-    stack_id = None
+    stack_id, page = None, 1
     payload = _decode_qr(warped, original)
     if payload:
         parsed = parse_payload(payload)
         if parsed:
-            stack_id = parsed["s"]
+            stack_id, page = parsed["s"], parsed["p"]
     else:
+        # ponytail: unlesbarer QR gilt als Seite 1 – landet ohnehin im Review
         warnings.append("QR-Code nicht lesbar – Stapel muss manuell zugeordnet werden")
 
-    answers = _read_bubbles(warped_gray, spec)
+    answers = [] if page == 2 else _read_bubbles(
+        warped_gray, spec(stack_id) if callable(spec) else spec)
     return ReadResult(stack_id=stack_id, quad_score=round(score, 4),
-                      answers=answers, warnings=warnings)
+                      answers=answers, warnings=warnings, page=page)

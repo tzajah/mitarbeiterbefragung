@@ -1,24 +1,38 @@
 """FastAPI-Backend: Stapel drucken, Scans einlesen, Review, k-anonyme Auswertung."""
 from __future__ import annotations
 
+import io
 import re
 import uuid
 from contextlib import asynccontextmanager
+from functools import partial
 from pathlib import Path
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from .auth import auth_middleware, register_auth
-from .config import K_DEFAULT, SCANS_DIR, TEMPLATES_DIR
+from .config import K_DEFAULT, LOGO_PATH, SCANS_DIR, SPEC_PATH, TEMPLATES_DIR
 from .db import get_db, init_db
-from .formgen.generator import render_pdf
-from .formgen.spec import SurveySpec, default_spec
+from .formgen.generator import intro_fits, label_fits, render_pdf
+from .formgen.layout import LAYOUT_VERSION, MAX_OPTIONS, MAX_QUESTIONS, compute_layout
+from .formgen.spec import (DEFAULT_ACCENT, DEFAULT_INTRO, DEFAULT_ORG_TITLE, HEX_RE,
+                           NO_ANSWER, Question, SurveySpec, default_spec)
 from .scan.reader import read_scan
 
-MAX_UPLOAD_BYTES = 25 * 1024 * 1024
+MAX_UPLOAD_BYTES = 25 * 1024 * 1024       # je Bilddatei
+MAX_PDF_BYTES = 100 * 1024 * 1024         # je PDF (Stapelscan vieler Bögen)
+MAX_SCAN_PAGES = 200                      # Seiten je Upload
+SCAN_PDF_DPI = 200                        # = CANONICAL_DPI, mehr bringt der Erkennung nichts
+MAX_LOGO_BYTES = 2 * 1024 * 1024
+MAX_LOGO_PIXELS = 25_000_000              # Decompression-Bomb-Schutz
+LOGO_MAX_SIDE = 1200
+PREVIEW_STACK_ID = "0" * 32
+NO_P2_WARN = "keine Freitextseite gefunden"
+ORPHAN_P2 = ("Freitextseite ohne zugehörige Fragenseite – bitte beide Seiten "
+             "zusammen hochladen")
 K_MIN, K_MAX = 2, 100
 _ID_RE = re.compile(r"^[a-f0-9]{32}$")
 
@@ -41,10 +55,38 @@ app.middleware("http")(auth_middleware)
 register_auth(app)
 
 
-# ---------- Spec-Auflösung (MVP: genau eine aktive Spec) ----------
+# ---------- Spec-Auflösung: aktive Spec + Snapshot je Stapel ----------
 
 def _active_spec() -> SurveySpec:
-    return default_spec()
+    spec = SurveySpec.load(SPEC_PATH) if SPEC_PATH.exists() else default_spec()
+    spec.layout_version = LAYOUT_VERSION  # neue Stapel immer im aktuellen Layout
+    return spec
+
+
+def _logo() -> bytes | None:
+    return LOGO_PATH.read_bytes() if LOGO_PATH.exists() else None
+
+
+def _stack_spec(stack_id: str | None) -> SurveySpec:
+    """Spec, mit der der Stapel gedruckt wurde. Altbestand ohne Snapshot → Standard;
+    unbekannter/fehlender Stapel → aktive Spec."""
+    if stack_id and _valid_id(stack_id):
+        snap = TEMPLATES_DIR / f"{stack_id}.json"
+        if snap.exists():
+            return SurveySpec.load(snap)
+        with get_db() as db:
+            if db.execute("SELECT 1 FROM stacks WHERE id = ?", (stack_id,)).fetchone():
+                legacy = default_spec()
+                legacy.layout_version = 1  # vor den Snapshots gedruckt → altes Layout
+                return legacy
+    return _active_spec()
+
+
+def _spec_dict(spec: SurveySpec) -> dict:
+    d = spec.to_dict()
+    for q, qd in zip(spec.questions, d["questions"]):
+        qd["answers"] = q.answers()
+    return d
 
 
 # ---------- Stapel ----------
@@ -60,9 +102,10 @@ def create_stack(body: StackCreate):
         raise HTTPException(422, "Abteilungsname fehlt oder zu lang (max. 80 Zeichen)")
     stack_id = uuid.uuid4().hex
     spec = _active_spec()
-    pdf = render_pdf(spec, stack_id)
+    pdf = render_pdf(spec, stack_id, _logo())  # Logo steckt danach im gespeicherten PDF
     pdf_path = TEMPLATES_DIR / f"{stack_id}.pdf"
     pdf_path.write_bytes(pdf)
+    spec.save(TEMPLATES_DIR / f"{stack_id}.json")  # Snapshot: Stapel behält seine Fragen
     with get_db() as db:
         db.execute("INSERT INTO stacks (id, department) VALUES (?, ?)",
                    (stack_id, dept))
@@ -94,21 +137,99 @@ def stack_pdf(stack_id: str):
 
 # ---------- Scan-Upload ----------
 
-@app.post("/api/scans")
-async def upload_scan(file: UploadFile = File(...)):
-    image_bytes = await file.read()
-    if len(image_bytes) > MAX_UPLOAD_BYTES:
-        raise HTTPException(413, "Bild zu groß (max. 25 MB)")
-    return _ingest_scan(image_bytes)
+def _as_jpeg(image_bytes: bytes) -> bytes:
+    if image_bytes[:3] == b"\xff\xd8\xff":
+        return image_bytes
+    import cv2
+    import numpy as np
+    img = cv2.imdecode(np.frombuffer(image_bytes, np.uint8), cv2.IMREAD_COLOR)
+    return cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 90])[1].tobytes()
 
 
-def _ingest_scan(image_bytes: bytes) -> dict:
-    spec = _active_spec()
+def _pdf_pages(data: bytes, name: str) -> list:
+    """PDF → [(Bezeichnung, Lader)]; gerendert wird erst beim Verarbeiten der Seite."""
+    import pypdfium2 as pdfium
     try:
-        result = read_scan(image_bytes, spec)
-    except ValueError as e:
-        raise HTTPException(422, str(e))
+        doc = pdfium.PdfDocument(data)
+    except pdfium.PdfiumError:
+        raise HTTPException(422, f"{name}: PDF konnte nicht geöffnet werden")
 
+    def render(i: int) -> bytes:
+        page = doc[i]
+        # Riesen-Seitenformate nicht zu Gigapixel-Bitmaps aufblasen
+        scale = min(SCAN_PDF_DPI / 72.0, 4000 / max(page.get_size()))
+        buf = io.BytesIO()
+        page.render(scale=scale).to_pil().convert("RGB").save(buf, "JPEG", quality=90)
+        return buf.getvalue()
+
+    return [(f"{name} – Seite {i + 1}", partial(render, i)) for i in range(len(doc))]
+
+
+@app.post("/api/scans")
+async def upload_scan(file: list[UploadFile] = File(...)):
+    """Ein oder mehrere Bilder und/oder PDFs (jede PDF-Seite = ein Blatt).
+
+    Reihenfolge zählt: Eine Freitextseite (2) gehört zur unmittelbar vorangehenden
+    Fragenseite (1) desselben Stapels (Duplex-Scan: S1, S2, S1, S2 …).
+    Antwort: bei genau EINEM Bild wie bisher das Ergebnis-Objekt (Fehler → HTTP 422),
+    sonst {"pages": [...]} mit Ergebnis oder "error" je Seite."""
+    pages = []
+    single_image = len(file) == 1
+    for f in file:
+        name = f.filename or "Datei"
+        data = await f.read(MAX_PDF_BYTES + 1)
+        if data[:5] == b"%PDF-":
+            single_image = False
+            if len(data) > MAX_PDF_BYTES:
+                raise HTTPException(413, f"{name}: PDF zu groß (max. 100 MB)")
+            pages += _pdf_pages(data, name)
+        else:
+            if len(data) > MAX_UPLOAD_BYTES:
+                raise HTTPException(413, f"{name}: Bild zu groß (max. 25 MB)")
+            pages.append((name, partial(bytes, data)))
+        if len(pages) > MAX_SCAN_PAGES:
+            raise HTTPException(413, f"Zu viele Seiten (max. {MAX_SCAN_PAGES} je Upload)")
+    results = _ingest_pages(pages)
+    if single_image:
+        r = results[0]
+        if "error" in r:
+            raise HTTPException(422, r["error"])
+        return r
+    return {"pages": results}
+
+
+def _ingest_pages(pages: list) -> list[dict]:
+    out: list[dict] = []
+    open_p1: tuple[str | None, dict] | None = None  # (QR-Stapel, Ergebnis) der letzten Seite 1
+    for n, (name, load) in enumerate(pages, 1):
+        entry = {"page": n, "name": name}
+        try:
+            image_bytes = load()
+            result = read_scan(image_bytes, _stack_spec)
+        except ValueError as e:
+            out.append({**entry, "error": str(e)})
+            open_p1 = None
+            continue
+        if result.page == 2:
+            if open_p1 and result.stack_id and open_p1[0] == result.stack_id:
+                p1 = open_p1[1]
+                (SCANS_DIR / f"{p1['response_id']}_p2.jpg").write_bytes(_as_jpeg(image_bytes))
+                p1["image2_url"] = f"/api/responses/{p1['response_id']}/image?page=2"
+                out.append({**entry, "sheet_page": 2, "response_id": p1["response_id"]})
+            else:
+                out.append({**entry, "error": ORPHAN_P2})
+            open_p1 = None
+            continue
+        r = {**entry, "sheet_page": 1, **_store_response(result, image_bytes)}
+        out.append(r)
+        open_p1 = (result.stack_id, r)
+    for r in out:
+        if r.get("sheet_page") == 1 and not r["image2_url"]:
+            r["warnings"].append(NO_P2_WARN)
+    return out
+
+
+def _store_response(result, image_bytes: bytes) -> dict:
     response_id = uuid.uuid4().hex
     stack_id = result.stack_id
     with get_db() as db:
@@ -125,7 +246,7 @@ def _ingest_scan(image_bytes: bytes) -> dict:
                 " needs_review, note) VALUES (?, ?, ?, ?, ?, ?)",
                 (response_id, a.question_id, a.value, a.confidence,
                  int(a.needs_review), a.note))
-    (SCANS_DIR / f"{response_id}.jpg").write_bytes(image_bytes)
+    (SCANS_DIR / f"{response_id}.jpg").write_bytes(_as_jpeg(image_bytes))
     return {
         "response_id": response_id,
         "stack_id": stack_id,
@@ -133,6 +254,7 @@ def _ingest_scan(image_bytes: bytes) -> dict:
         "warnings": result.warnings,
         "answers": [vars(a) for a in result.answers],
         "image_url": f"/api/responses/{response_id}/image",
+        "image2_url": None,
     }
 
 
@@ -140,8 +262,8 @@ def _ingest_scan(image_bytes: bytes) -> dict:
 
 @app.post("/api/stacks/{stack_id}/demo")
 def demo_scan(stack_id: str):
-    """Erzeugt einen synthetisch ausgefüllten, rotierten Bogen und läuft ihn
-    durch die ECHTE Erkennungs-Pipeline – zum Testen des Workflows ohne Hardware.
+    """Erzeugt einen synthetisch ausgefüllten, rotierten Bogen (beide Seiten, S. 2 mit
+    Gekritzel) und schickt ihn als zweiseitigen Upload durch die ECHTE Pipeline.
     Der Bogen landet (wie ein echter Scan) unfinalisiert im Review."""
     if not _valid_id(stack_id):
         raise HTTPException(404, "Stapel nicht gefunden")
@@ -149,25 +271,163 @@ def demo_scan(stack_id: str):
     if not pdf_path.exists():
         raise HTTPException(404, "Stapel-PDF nicht gefunden")
     import numpy as np
-    from .scan.synth import fill_form, render_pdf_to_image, simulate_scan
+    import pypdfium2 as pdfium
+    from .scan.synth import fill_form, render_pdf_to_image, scribble, simulate_scan
     rng = np.random.default_rng()
-    spec = _active_spec()
+    spec = _stack_spec(stack_id)
+    pdf = pdf_path.read_bytes()
     answers = {q.id: (int(rng.integers(0, len(q.answers())))
                       if rng.random() > 0.15 else None)
                for q in spec.questions}
-    img = fill_form(render_pdf_to_image(pdf_path.read_bytes()), spec, answers, rng=rng)
-    return _ingest_scan(simulate_scan(img, rng=rng))
+    scans = [simulate_scan(fill_form(render_pdf_to_image(pdf), spec, answers, rng=rng), rng=rng)]
+    if len(pdfium.PdfDocument(pdf)) > 1:  # Altbestand ist einseitig
+        scans.append(simulate_scan(scribble(render_pdf_to_image(pdf, page=1), rng), rng=rng))
+    r = _ingest_pages([(f"Demo S{i + 1}", partial(bytes, s)) for i, s in enumerate(scans)])[0]
+    if "error" in r:
+        raise HTTPException(422, r["error"])
+    return r
 
 
 # ---------- Spec für das Frontend ----------
 
 @app.get("/api/spec")
 def get_spec():
-    spec = _active_spec()
-    d = spec.to_dict()
-    for q, qd in zip(spec.questions, d["questions"]):
-        qd["answers"] = q.answers()
-    return d
+    return _spec_dict(_active_spec())
+
+
+class QuestionIn(BaseModel):
+    text: str = ""
+    kind: str = "scale"
+    options: list[str] = []
+    scale_labels: list[str] = []
+
+
+class SpecIn(BaseModel):
+    title: str = ""
+    free_text_prompt: str = ""
+    org_title: str = DEFAULT_ORG_TITLE
+    org_subtitle: str = ""
+    accent_color: str = DEFAULT_ACCENT
+    intro: str = DEFAULT_INTRO
+    questions: list[QuestionIn] = []
+
+
+def _spec_from_input(body: SpecIn) -> SurveySpec:
+    """Vertrauensgrenze: validiert und trimmt; IDs vergibt der Server nach Position."""
+    def need(value: str, label: str, limit: int) -> str:
+        v = value.strip()
+        if not v:
+            raise HTTPException(422, f"{label} darf nicht leer sein")
+        if len(v) > limit:
+            raise HTTPException(422, f"{label} ist zu lang (max. {limit} Zeichen)")
+        return v
+
+    def opt(value: str, label: str, limit: int) -> str:
+        v = value.strip()
+        if len(v) > limit:
+            raise HTTPException(422, f"{label} ist zu lang (max. {limit} Zeichen)")
+        return v
+
+    title = need(body.title, "Titel", 80)
+    prompt = need(body.free_text_prompt, "Freitext-Frage", 100)
+    org_title = opt(body.org_title, "Organisation", 40)
+    org_subtitle = opt(body.org_subtitle, "Untertitel", 60)
+    intro = opt(body.intro, "Hinweistext", 240)
+    if not intro_fits(intro):
+        raise HTTPException(422, "Hinweistext passt nicht in zwei Zeilen – bitte kürzen")
+    accent = body.accent_color.strip()
+    if not HEX_RE.match(accent):
+        raise HTTPException(422, "Akzentfarbe muss im Format #RRGGBB angegeben werden")
+    if not (1 <= len(body.questions) <= MAX_QUESTIONS):
+        raise HTTPException(422, f"Es sind 1–{MAX_QUESTIONS} Fragen erlaubt "
+                                 f"(aktuell {len(body.questions)})")
+    qs = []
+    for i, q in enumerate(body.questions, 1):
+        where = f"Frage {i}"
+        if q.kind not in ("scale", "choice"):
+            raise HTTPException(422, f"{where}: Typ muss Skala oder Auswahl sein")
+        text = need(q.text, f"{where}: Fragetext", 100)
+        opts = [need(o, f"{where}: Antwortoption", 40)
+                for o in (q.options if q.kind == "choice" else q.scale_labels)]
+        if not (2 <= len(opts) <= MAX_OPTIONS):
+            raise HTTPException(422, f"{where}: 2–{MAX_OPTIONS} Antwortoptionen nötig "
+                                     f"(ohne 'Keine Angabe'), aktuell {len(opts)}")
+        if len({o.casefold() for o in opts}) != len(opts):
+            raise HTTPException(422, f"{where}: Antwortoptionen dürfen sich nicht doppeln")
+        for o in opts:
+            if o.casefold() == NO_ANSWER.casefold():
+                raise HTTPException(422, f"{where}: '{NO_ANSWER}' wird automatisch ergänzt")
+            if not label_fits(o):
+                raise HTTPException(422, f"{where}: Option '{o}' ist zu lang für die Spalte "
+                                         "(max. zwei kurze Zeilen, ca. 2 × 12 Zeichen)")
+        qs.append(Question(id=f"q{i:02d}", text=text, kind=q.kind,
+                           options=opts if q.kind == "choice" else [],
+                           scale_labels=opts if q.kind == "scale" else []))
+    spec = SurveySpec(title=title, questions=qs, free_text_prompt=prompt, org_title=org_title,
+                      org_subtitle=org_subtitle, accent_color=accent, intro=intro)
+    try:
+        compute_layout(spec)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    return spec
+
+
+@app.put("/api/spec")
+def put_spec(body: SpecIn):
+    spec = _spec_from_input(body)
+    spec.save(SPEC_PATH)
+    return _spec_dict(spec)
+
+
+@app.post("/api/spec/reset")
+def reset_spec():
+    SPEC_PATH.unlink(missing_ok=True)
+    return _spec_dict(default_spec())
+
+
+@app.get("/api/spec/preview.pdf")
+def spec_preview():
+    """Gespeicherte Spec + Logo mit Dummy-Stapel-ID – zum Design-Testen, legt nichts an."""
+    return Response(render_pdf(_active_spec(), PREVIEW_STACK_ID, _logo()),
+                    media_type="application/pdf",
+                    headers={"Content-Disposition": "inline; filename=vorschau.pdf"})
+
+
+# ---------- Logo ----------
+
+@app.post("/api/logo")
+async def upload_logo(file: UploadFile = File(...)):
+    from PIL import Image
+    data = await file.read(MAX_LOGO_BYTES + 1)
+    if len(data) > MAX_LOGO_BYTES:
+        raise HTTPException(413, "Logo zu groß (max. 2 MB)")
+    try:
+        im = Image.open(io.BytesIO(data))
+        if im.format not in ("PNG", "JPEG"):
+            raise ValueError("Format")
+        if im.width * im.height > MAX_LOGO_PIXELS:  # vor dem Dekodieren prüfen
+            raise ValueError("zu viele Pixel")
+        im.load()
+    except (OSError, ValueError, Image.DecompressionBombError):
+        raise HTTPException(422, "Logo muss ein gültiges PNG- oder JPEG-Bild sein "
+                                 "(max. 25 Megapixel)")
+    im = im.convert("RGBA")
+    im.thumbnail((LOGO_MAX_SIDE, LOGO_MAX_SIDE))
+    im.save(LOGO_PATH, "PNG")
+    return {"status": "ok", "width": im.width, "height": im.height}
+
+
+@app.get("/api/logo")
+def get_logo():
+    if not LOGO_PATH.exists():
+        raise HTTPException(404, "Kein Logo hinterlegt")
+    return FileResponse(LOGO_PATH, media_type="image/png")
+
+
+@app.delete("/api/logo")
+def delete_logo():
+    LOGO_PATH.unlink(missing_ok=True)
+    return {"status": "ok"}
 
 
 # ---------- Review ----------
@@ -201,15 +461,18 @@ def response_detail(response_id: str):
         answers = db.execute(
             "SELECT question_id, value, confidence, needs_review, note, source"
             " FROM answers WHERE response_id = ?", (response_id,)).fetchall()
+    has_p2 = (SCANS_DIR / f"{response_id}_p2.jpg").exists()
     return {"response": dict(row), "answers": [dict(a) for a in answers],
-            "image_url": f"/api/responses/{response_id}/image"}
+            "spec": _spec_dict(_stack_spec(row["stack_id"])),
+            "image_url": f"/api/responses/{response_id}/image",
+            "image2_url": f"/api/responses/{response_id}/image?page=2" if has_p2 else None}
 
 
 @app.get("/api/responses/{response_id}/image")
-def response_image(response_id: str):
-    if not _valid_id(response_id):
+def response_image(response_id: str, page: int = 1):
+    if not _valid_id(response_id) or page not in (1, 2):
         raise HTTPException(404, "Scan-Bild nicht gefunden")
-    p = SCANS_DIR / f"{response_id}.jpg"
+    p = SCANS_DIR / (f"{response_id}.jpg" if page == 1 else f"{response_id}_p2.jpg")
     if not p.exists():
         raise HTTPException(404, "Scan-Bild nicht gefunden")
     return FileResponse(p, media_type="image/jpeg")
@@ -225,8 +488,6 @@ class FinalizeBody(BaseModel):
 def finalize_response(response_id: str, body: FinalizeBody):
     if not _valid_id(response_id):
         raise HTTPException(404, "Antwort nicht gefunden")
-    spec = _active_spec()
-    valid_values = {q.id: set(q.answers()) for q in spec.questions}
     with get_db() as db:
         row = db.execute("SELECT finalized FROM responses WHERE id = ?",
                          (response_id,)).fetchone()
@@ -238,6 +499,7 @@ def finalize_response(response_id: str, body: FinalizeBody):
             raise HTTPException(400, "Stapel-Zuordnung fehlt (Abteilung)")
         if not db.execute("SELECT 1 FROM stacks WHERE id = ?", (body.stack_id,)).fetchone():
             raise HTTPException(400, "Unbekannter Stapel")
+        valid_values = {q.id: set(q.answers()) for q in _stack_spec(body.stack_id).questions}
         for qid, value in body.corrections.items():
             if qid not in valid_values:
                 raise HTTPException(422, f"Unbekannte Frage: {qid}")
@@ -267,12 +529,16 @@ def results(k: int = K_DEFAULT):
             WHERE r.finalized = 1 GROUP BY st.department
         """).fetchall()
         out = []
-        spec = _active_spec()
         for d in departments:
             n = d["n"]
             entry = {"department": d["dept"], "n": n,
                      "suppressed": n < max(k, 1)}
             if not entry["suppressed"]:
+                latest = db.execute(
+                    "SELECT id FROM stacks WHERE department = ?"
+                    " ORDER BY created_at DESC, rowid DESC LIMIT 1", (d["dept"],)).fetchone()
+                entry["questions"] = [{"id": q.id, "text": q.text}
+                                      for q in _stack_spec(latest["id"]).questions]
                 rows = db.execute("""
                     SELECT a.question_id, a.value, COUNT(*) AS c
                     FROM answers a JOIN responses r ON r.id = a.response_id

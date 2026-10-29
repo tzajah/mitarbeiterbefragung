@@ -6,6 +6,8 @@ DATA_DIR = BASE_DIR / "data"
 TEMPLATES_DIR = DATA_DIR / "templates"
 SCANS_DIR = DATA_DIR / "scans"
 DB_PATH = DATA_DIR / "app.db"
+SPEC_PATH = DATA_DIR / "spec.json"  # aktive Fragen; fehlt → default_spec()
+LOGO_PATH = DATA_DIR / "logo.png"   # optionales Logo (beim Upload neu kodiert)
 
 # k-Anonymität: Auswertung einer Abteilung erst ab n >= K_DEFAULT Antworten
 K_DEFAULT = 5

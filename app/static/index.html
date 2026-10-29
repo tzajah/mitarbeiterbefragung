@@ -44,6 +44,11 @@
   .legend { font-size: 0.78rem; color: var(--muted); margin-top: 0.15rem; }
   .ft { background: #faf9f6; border: 1px solid var(--border); border-radius: 6px; padding: 0.5rem 0.7rem; margin: 0.3rem 0; font-size: 0.92rem; }
   a { color: var(--accent); }
+  .notice { background: #f7e8d5; color: #7a5212; border: 1px solid #e3c99b; border-radius: 6px; padding: 0.6rem 0.9rem; margin-bottom: 0.8rem; font-weight: 600; }
+  .qedit { border: 1px solid var(--border); border-radius: 6px; padding: 0.6rem 0.8rem; margin-bottom: 0.6rem; background: #faf9f6; }
+  .qedit input[type=text] { flex: 1; min-width: 12rem; }
+  .qedit textarea { min-height: 90px; margin-top: 0.4rem; }
+  button.ghost { background: var(--card); border: 1px solid var(--border); border-radius: 6px; padding: 0.3rem 0.7rem; font-size: 0.85rem; cursor: pointer; }
 </style>
 </head>
 <body>
@@ -54,6 +59,7 @@
     <button data-tab="scans">Scans</button>
     <button data-tab="review">Review</button>
     <button data-tab="results">Auswertung</button>
+    <button data-tab="spec">Fragebogen</button>
   </nav>
 </header>
 <main>
@@ -65,6 +71,8 @@
       <h3>Neuen Stapel anlegen</h3>
       <p class="muted">Ein Stapel gehört zu <b>einer Abteilung</b> und wird dort ausgelegt.
          Der QR-Code auf dem Bogen kennt nur den Stapel – niemals eine Person.</p>
+      <p class="muted">Der Bogen ist <b>zweiseitig</b> (Seite 2 = Freitext) – bitte
+         <b>beidseitig drucken (Duplex)</b>.</p>
       <div class="row">
         <input type="text" id="dept-name" placeholder="Abteilung, z. B. Produktion Nord">
         <button class="primary" onclick="createStack()">Stapel drucken (PDF)</button>
@@ -83,9 +91,12 @@
   <section id="tab-scans" class="hidden">
     <div class="card">
       <h3>Scans hochladen</h3>
-      <p class="muted">Eingescannte Bögen (JPEG/PNG). Die Erkennung läuft lokal – bei unsicheren
-         Markierungen landet der Bogen in der Review-Queue.</p>
-      <input type="file" id="scan-files" accept="image/*" multiple>
+      <p class="muted">Eingescannte Bögen als Bilder (JPEG/PNG) oder PDF (jede Seite = ein Blatt).
+         Die Erkennung läuft lokal – bei unsicheren Markierungen landet der Bogen in der Review-Queue.
+         Duplex-Scans in Reihenfolge hochladen (S. 1, S. 2, S. 1, S. 2 …): Eine Freitextseite wird
+         der unmittelbar davor liegenden Fragenseite zugeordnet. Mehrere Bilder werden nach
+         Dateinamen sortiert.</p>
+      <input type="file" id="scan-files" accept="image/*,application/pdf" multiple>
       <button class="primary" onclick="uploadScans()">Hochladen &amp; erkennen</button>
       <div id="scan-progress" class="muted"></div>
       <div id="scan-results"></div>
@@ -112,6 +123,9 @@
           </div>
           <div id="review-answers"></div>
           <h4 style="margin-bottom:0.3rem">Freitext</h4>
+          <img id="review-img2" class="hidden" alt="Seite 2 (Freitext)"
+               style="width:100%;border:1px solid var(--border);border-radius:6px;margin-bottom:0.4rem">
+          <p id="review-noimg2" class="muted hidden">Keine Freitextseite (Seite 2) eingescannt.</p>
           <textarea id="review-freetext" placeholder="Freitext hier abtippen …"></textarea>
           <div class="row" style="margin-top:0.7rem">
             <button class="primary" onclick="finalizeReview()">Finalisieren</button>
@@ -134,6 +148,63 @@
       <p class="muted">Abteilungen mit weniger als k Antworten werden vollständig
          unterdrückt (Schutz vor Re-Identifikation durch Ausschluss).</p>
       <div id="results-body"></div>
+    </div>
+  </section>
+
+  <!-- ============ FRAGEBOGEN ============ -->
+  <section id="tab-spec" class="hidden">
+    <div class="card">
+      <h3>Fragebogen festlegen</h3>
+      <div class="notice">Änderungen gelten nur für neu angelegte Stapel – bereits gedruckte Stapel behalten ihren Fragebogen.</div>
+      <div class="row" style="margin-bottom:0.5rem">
+        <label style="width:9rem">Titel</label>
+        <input type="text" id="spec-title" maxlength="80" style="flex:1">
+      </div>
+      <div class="row" style="margin-bottom:0.5rem">
+        <label style="width:9rem">Freitext-Frage</label>
+        <input type="text" id="spec-prompt" maxlength="100" style="flex:1">
+      </div>
+      <div class="row" style="margin-bottom:0.5rem">
+        <label style="width:9rem">Organisation</label>
+        <input type="text" id="spec-org-title" maxlength="40" placeholder="BETRIEBSRAT" style="flex:1">
+      </div>
+      <div class="row" style="margin-bottom:0.5rem">
+        <label style="width:9rem">Untertitel</label>
+        <input type="text" id="spec-org-subtitle" maxlength="60" placeholder="Organisation · Ort" style="flex:1">
+      </div>
+      <div class="row" style="margin-bottom:0.5rem">
+        <label style="width:9rem">Hinweistext</label>
+        <textarea id="spec-intro" maxlength="240" style="flex:1;min-height:3.2rem"></textarea>
+      </div>
+      <div class="row" style="margin-bottom:0.8rem">
+        <label style="width:9rem">Akzentfarbe</label>
+        <input type="color" id="spec-accent">
+        <span class="muted">gestrichelte Linien im Kopf</span>
+      </div>
+      <div id="spec-questions"></div>
+      <div class="row">
+        <button class="ghost" onclick="specAdd()">+ Frage hinzufügen</button>
+        <span class="muted" id="spec-count"></span>
+      </div>
+      <div class="row" style="margin-top:1rem">
+        <button class="primary" onclick="specSave()">Speichern</button>
+        <button class="ghost" onclick="specReset()">Auf Standard zurücksetzen</button>
+        <button class="ghost" onclick="window.open('/api/spec/preview.pdf?t=' + Date.now(), '_blank')">Vorschau-PDF (gespeicherter Stand)</button>
+      </div>
+    </div>
+    <div class="card">
+      <h3>Logo</h3>
+      <p class="muted">PNG oder JPEG, max. 2 MB. Erscheint oben rechts neben dem QR-Code –
+         wird beim Anlegen eines Stapels fest ins PDF übernommen.</p>
+      <div class="row">
+        <img id="logo-img" class="hidden" alt="Logo" style="max-height:60px;max-width:240px;border:1px solid var(--border);padding:4px;background:#fff">
+        <span id="logo-none" class="muted">Kein Logo hinterlegt.</span>
+      </div>
+      <div class="row" style="margin-top:0.6rem">
+        <input type="file" id="logo-file" accept="image/png,image/jpeg">
+        <button class="primary" onclick="logoUpload()">Hochladen</button>
+        <button class="ghost" onclick="logoDelete()">Entfernen</button>
+      </div>
     </div>
   </section>
 </main>
@@ -168,6 +239,7 @@ document.querySelectorAll("nav button").forEach(btn => {
     if (btn.dataset.tab === "stacks") loadStacks();
     if (btn.dataset.tab === "review") loadReviewList();
     if (btn.dataset.tab === "results") loadResults();
+    if (btn.dataset.tab === "spec") loadSpec();
   };
 });
 
@@ -217,32 +289,41 @@ async function uploadScans() {
   if (!files.length) return flash("Keine Dateien gewählt", false);
   const box = $("#scan-results");
   box.innerHTML = "";
-  for (let i = 0; i < files.length; i++) {
-    $("#scan-progress").textContent = `Datei ${i + 1} von ${files.length} …`;
-    const fd = new FormData();
-    fd.append("file", files[i]);
-    try {
-      const r = await api("/api/scans", { method: "POST", body: fd });
-      const nReview = r.answers.filter(a => a.needs_review && a.value === null).length;
-      box.insertAdjacentHTML("beforeend", `
-        <div class="ans">
-          <span>${esc(files[i].name)}</span>
-          <span>
-            ${r.stack_id ? '<span class="badge ok">Stapel erkannt</span>'
-                         : '<span class="badge warn">Stapel fehlt → Review</span>'}
-            ${nReview ? `<span class="badge warn">${nReview} Feld(er) zu prüfen</span>`
-                      : '<span class="badge ok">lesbar</span>'}
-            <button class="small" onclick="openReview('${r.response_id}')">Review</button>
-          </span>
-        </div>`);
-    } catch (e) {
-      box.insertAdjacentHTML("beforeend",
-        `<div class="ans"><span>${esc(files[i].name)}</span>
-         <span class="badge bad">${esc(String(e.message || e))}</span></div>`);
-    }
+  // EIN Upload, damit Seite 2 ihrer Seite 1 zugeordnet werden kann (Reihenfolge zählt)
+  const sorted = [...files].sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+  const fd = new FormData();
+  sorted.forEach(f => fd.append("file", f));
+  $("#scan-progress").textContent = `${sorted.length} Datei(en) werden erkannt …`;
+  try {
+    const r = await api("/api/scans", { method: "POST", body: fd });
+    const pages = r.pages || [{ ...r, name: sorted[0].name, sheet_page: 1 }];
+    pages.forEach(p => box.insertAdjacentHTML("beforeend", scanRow(p)));
+  } catch (e) {
+    box.insertAdjacentHTML("beforeend",
+      `<div class="ans"><span>Upload</span><span class="badge bad">${esc(String(e.message || e))}</span></div>`);
   }
   $("#scan-progress").textContent = "";
   $("#scan-files").value = "";
+}
+
+function scanRow(p) {
+  const name = `<span>${esc(p.name)}</span>`;
+  if (p.error) return `<div class="ans">${name}<span class="badge bad">${esc(p.error)}</span></div>`;
+  if (p.sheet_page === 2)
+    return `<div class="ans">${name}<span class="badge ok">Freitextseite zugeordnet</span></div>`;
+  const nReview = p.answers.filter(a => a.needs_review && a.value === null).length;
+  return `
+    <div class="ans">
+      ${name}
+      <span>
+        ${p.stack_id ? '<span class="badge ok">Stapel erkannt</span>'
+                     : '<span class="badge warn">Stapel fehlt → Review</span>'}
+        ${nReview ? `<span class="badge warn">${nReview} Feld(er) zu prüfen</span>`
+                  : '<span class="badge ok">lesbar</span>'}
+        ${p.image2_url ? "" : '<span class="badge warn">ohne Freitextseite</span>'}
+        <button class="small" onclick="openReview('${p.response_id}')">Review</button>
+      </span>
+    </div>`;
 }
 
 /* ---------- Review ---------- */
@@ -264,11 +345,16 @@ async function loadReviewList() {
 }
 
 async function openReview(id) {
-  const [detail, stacks, spec] = await Promise.all([
-    api("/api/responses/" + id), api("/api/stacks"), api("/api/spec")
+  const [detail, stacks] = await Promise.all([
+    api("/api/responses/" + id), api("/api/stacks")
   ]);
+  const spec = detail.spec;  // Fragen des Stapels, nicht die aktive Spec
   reviewState = { id, stacks };
   $("#review-img").src = detail.image_url;
+  const img2 = $("#review-img2");
+  img2.classList.toggle("hidden", !detail.image2_url);
+  $("#review-noimg2").classList.toggle("hidden", !!detail.image2_url);
+  if (detail.image2_url) img2.src = detail.image2_url; else img2.removeAttribute("src");
   const sel = $("#review-stack");
   sel.innerHTML = "<option value=''>— bitte wählen —</option>" +
     stacks.map(s => `<option value="${s.id}">${esc(s.department)}</option>`).join("");
@@ -336,6 +422,7 @@ async function loadResults() {
       continue;
     }
     let html = `<div class="card"><h4>${esc(d.department)} <span class="badge ok">n = ${d.n}</span></h4>`;
+    const qtext = Object.fromEntries((d.questions || []).map(q => [q.id, q.text]));
     for (const [qid, dist] of Object.entries(d.distributions || {})) {
       const entries = Object.entries(dist);
       const total = entries.reduce((s, [, c]) => s + c, 0) || 1;
@@ -343,7 +430,7 @@ async function loadResults() {
         `<span style="width:${(100 * c / total).toFixed(1)}%;background:${DIST_COLORS[i % DIST_COLORS.length]}">${c}</span>`).join("");
       const legend = entries.map(([v, c], i) =>
         `<i style="color:${DIST_COLORS[i % DIST_COLORS.length]}">■</i> ${esc(v)} (${c})`).join(" · ");
-      html += `<div class="dist"><b>${esc(qid)}</b>
+      html += `<div class="dist"><b>${esc(qtext[qid] || qid)}</b>
         <div class="bar">${bars}</div><div class="legend">${legend}</div></div>`;
     }
     if (d.free_texts && d.free_texts.length) {
@@ -354,6 +441,141 @@ async function loadResults() {
   }
   if (!data.departments.length)
     body.innerHTML = "<p class='muted'>Noch keine finalisierten Antworten.</p>";
+}
+
+/* ---------- Fragebogen ---------- */
+const SCALE5 = ["stimme nicht zu", "eher nein", "neutral", "eher ja", "stimme zu"];
+const MAX_Q = 30;
+let specDraft = null;
+
+async function loadSpec() {
+  const d = await api("/api/spec");
+  setSpecDraft(d);
+  loadLogo();
+}
+
+function loadLogo() {
+  const img = $("#logo-img");
+  img.onload = () => { img.classList.remove("hidden"); $("#logo-none").classList.add("hidden"); };
+  img.onerror = () => { img.classList.add("hidden"); $("#logo-none").classList.remove("hidden"); };
+  img.src = "/api/logo?t=" + Date.now();
+}
+
+async function logoUpload() {
+  const f = $("#logo-file").files[0];
+  if (!f) return flash("Bitte eine Bilddatei wählen", false);
+  const fd = new FormData();
+  fd.append("file", f);
+  try {
+    await api("/api/logo", { method: "POST", body: fd });
+    $("#logo-file").value = "";
+    loadLogo();
+    flash("Logo gespeichert – gilt für neu angelegte Stapel.");
+  } catch (e) {
+    flash("Logo-Upload fehlgeschlagen: " + (e.message || e), false);
+  }
+}
+
+async function logoDelete() {
+  try {
+    await api("/api/logo", { method: "DELETE" });
+    loadLogo();
+    flash("Logo entfernt.");
+  } catch (e) {
+    flash("Entfernen fehlgeschlagen: " + (e.message || e), false);
+  }
+}
+
+function setSpecDraft(d) {
+  specDraft = {
+    title: d.title, free_text_prompt: d.free_text_prompt,
+    questions: d.questions.map(q => ({
+      text: q.text, kind: q.kind,
+      options: q.options.slice(), scale_labels: q.scale_labels.slice()
+    }))
+  };
+  $("#spec-title").value = d.title;
+  $("#spec-prompt").value = d.free_text_prompt;
+  $("#spec-org-title").value = d.org_title;
+  $("#spec-org-subtitle").value = d.org_subtitle;
+  $("#spec-intro").value = d.intro;
+  $("#spec-accent").value = d.accent_color.toLowerCase();
+  renderSpec();
+}
+
+function specAdd() {
+  if (specDraft.questions.length >= MAX_Q) return flash(`Maximal ${MAX_Q} Fragen`, false);
+  specDraft.questions.push({ text: "", kind: "scale", options: ["", ""], scale_labels: SCALE5.slice() });
+  renderSpec();
+}
+
+function specMove(i, d) {
+  const qs = specDraft.questions, j = i + d;
+  if (j < 0 || j >= qs.length) return;
+  [qs[i], qs[j]] = [qs[j], qs[i]];
+  renderSpec();
+}
+
+function renderSpec() {
+  const box = $("#spec-questions");
+  box.textContent = "";
+  specDraft.questions.forEach((q, i) => {
+    const mk = (tag, props, parent) => Object.assign(parent.appendChild(document.createElement(tag)), props);
+    const card = mk("div", { className: "qedit" }, box);
+    const row = mk("div", { className: "row" }, card);
+    mk("b", { textContent: (i + 1) + "." }, row);
+    const txt = mk("input", { type: "text", value: q.text, maxLength: 100, placeholder: "Fragetext" }, row);
+    txt.oninput = () => { q.text = txt.value; };
+    const kind = mk("select", {}, row);
+    kind.add(new Option("Skala", "scale")); kind.add(new Option("Auswahl", "choice"));
+    kind.value = q.kind;
+    mk("button", { className: "ghost", textContent: "↑", title: "nach oben", onclick: () => specMove(i, -1) }, row);
+    mk("button", { className: "ghost", textContent: "↓", title: "nach unten", onclick: () => specMove(i, 1) }, row);
+    mk("button", { className: "ghost", textContent: "Entfernen", onclick: () => { specDraft.questions.splice(i, 1); renderSpec(); } }, row);
+    const hint = mk("div", { className: "muted" }, card);
+    const ta = mk("textarea", { placeholder: "Eine Antwortoption pro Zeile" }, card);
+    const key = () => (q.kind === "choice" ? "options" : "scale_labels");
+    const fill = () => {
+      hint.textContent = (q.kind === "choice" ? "Antwortoptionen" : "Skalenstufen") +
+        " (eine pro Zeile, 2–5; „Keine Angabe“ wird automatisch ergänzt):";
+      ta.value = q[key()].join("\n");
+    };
+    ta.oninput = () => { q[key()] = ta.value.split("\n"); };
+    kind.onchange = () => { q.kind = kind.value; fill(); };
+    fill();
+  });
+  $("#spec-count").textContent = `${specDraft.questions.length} / ${MAX_Q} Fragen`;
+}
+
+async function specSave() {
+  const body = {
+    title: $("#spec-title").value, free_text_prompt: $("#spec-prompt").value,
+    org_title: $("#spec-org-title").value, org_subtitle: $("#spec-org-subtitle").value,
+    intro: $("#spec-intro").value, accent_color: $("#spec-accent").value,
+    // leere Zeilen der Optionsfelder verwerfen
+    questions: specDraft.questions.map(q => ({
+      text: q.text, kind: q.kind,
+      options: q.options.filter(o => o.trim()), scale_labels: q.scale_labels.filter(o => o.trim())
+    }))
+  };
+  try {
+    setSpecDraft(await api("/api/spec", {
+      method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body)
+    }));
+    flash("Fragebogen gespeichert – gilt für neu angelegte Stapel.");
+  } catch (e) {
+    flash("Speichern fehlgeschlagen: " + (e.message || e), false);
+  }
+}
+
+async function specReset() {
+  if (!confirm("Fragebogen auf den Standard zurücksetzen? Nicht gespeicherte Änderungen gehen verloren.")) return;
+  try {
+    setSpecDraft(await api("/api/spec/reset", { method: "POST" }));
+    flash("Auf Standard zurückgesetzt.");
+  } catch (e) {
+    flash("Zurücksetzen fehlgeschlagen: " + (e.message || e), false);
+  }
 }
 
 function esc(s) {

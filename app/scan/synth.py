@@ -10,14 +10,14 @@ import io
 import cv2
 import numpy as np
 
-from ..formgen.layout import bubble_centers_mm, mm_to_px
+from ..formgen.layout import FREE_BOX_MM, compute_layout, mm_to_px
 
 
-def render_pdf_to_image(pdf_bytes: bytes, dpi: int = 150) -> np.ndarray:
+def render_pdf_to_image(pdf_bytes: bytes, dpi: int = 150, page: int = 0) -> np.ndarray:
     import pypdfium2 as pdfium
 
     doc = pdfium.PdfDocument(pdf_bytes)
-    page = doc[0]
+    page = doc[page]
     pil = page.render(scale=dpi / 72.0).to_pil()
     return cv2.cvtColor(np.array(pil.convert("RGB")), cv2.COLOR_RGB2BGR)
 
@@ -27,11 +27,11 @@ def fill_form(img: np.ndarray, spec, answers: dict[str, int | None],
     """Zeichnet Kreuze in die Bubbles. answers: question_id → Optionsindex (oder None)."""
     rng = rng or np.random.default_rng()
     out = img.copy()
-    for i, q in enumerate(spec.questions):
+    for q, row in zip(spec.questions, compute_layout(spec).rows):
         j = answers.get(q.id)
         if j is None:
             continue
-        xmm, ymm = bubble_centers_mm(i, len(q.answers()))[j]
+        xmm, ymm = row.bubbles[j]
         cx, cy = int(round(mm_to_px(xmm, dpi))), int(round(mm_to_px(ymm, dpi)))
         r = mm_to_px(2.2, dpi)
         # leicht versetzt + Radius-Jitter = menschliches Ankrezzen
@@ -40,6 +40,21 @@ def fill_form(img: np.ndarray, spec, answers: dict[str, int | None],
         rr = r * rng.uniform(0.85, 1.1)
         color = (60, 45, 25)  # dunkles Kugelschreiber-Blau-Schwarz (BGR)
         cv2.circle(out, (cx, cy), int(round(rr)), color, thickness=-1, lineType=cv2.LINE_AA)
+    return out
+
+
+def scribble(img: np.ndarray, rng: np.random.Generator | None = None,
+             dpi: int = 150, lines: int = 4) -> np.ndarray:
+    """Etwas „Handschrift“-Gekritzel in den Freitextkasten (Seite 2)."""
+    rng = rng or np.random.default_rng()
+    out = img.copy()
+    x0, y0, x1, _ = FREE_BOX_MM
+    for k in range(lines):
+        y = y0 + 8.0 + k * 10.0
+        xs = np.linspace(x0 + 6, x0 + 6 + rng.uniform(60, x1 - x0 - 15), 60)
+        ys = y + 1.6 * np.sin(xs * rng.uniform(1.5, 3.0)) + rng.normal(0, 0.3, xs.size)
+        pts = np.array([[mm_to_px(a, dpi), mm_to_px(b, dpi)] for a, b in zip(xs, ys)], np.int32)
+        cv2.polylines(out, [pts], False, (60, 45, 25), 2, cv2.LINE_AA)
     return out
 
 

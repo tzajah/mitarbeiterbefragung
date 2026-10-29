@@ -69,10 +69,26 @@ docker compose up -d --build
 ### Betriebs-Hinweise
 
 - SQLite läuft im WAL-Modus (parallele Leser + Schreiber im Team sind unkritisch).
-- Upload-Limit: 25 MB pro Scan.
+- Upload-Limits: 25 MB je Bilddatei, 100 MB je PDF, max. 200 Seiten je Upload.
 - Die Speicherung erfolgt vollständig lokal im Container/Server – es gibt keine
   externen API-Aufrufe. DSGVO-Anforderung „Daten verlassen das Haus nicht" ist
   damit per Architektur erfüllt.
+
+## Bogen-Design, Logo, PDF-Import
+
+- **Zweiseitiger Bogen** (Duplex drucken): Seite 1 = Fragen als Tabellen (je Gruppe gleicher
+  Antwortsätze eine schwarze Kopfzeile, „Keine Angabe“ immer rechts), Seite 2 = Freitext.
+  Beide Seiten tragen Eckmarken + QR-Code (nur Stapel-ID + Seitennummer, keine Bogen-Nummer).
+- **Design-Felder** im Tab „Fragebogen“: Organisation (z. B. „BETRIEBSRAT“), Untertitel
+  („Organisation · Ort“), Hinweistext (max. 2 Zeilen), Akzentfarbe (gestrichelte Linien).
+  Passt ein Fragebogen nicht auf Seite 1 (zu viele Fragen/Antwortsätze), lehnt das Speichern
+  ihn ab. 30 Fragen mit einem Antwortsatz passen.
+- **Logo:** PNG/JPEG bis 2 MB hochladen (`POST /api/logo`); wird neu kodiert, verkleinert und
+  beim Anlegen eines Stapels fest ins PDF eingebettet. „Vorschau-PDF“ zeigt den gespeicherten Stand.
+- **PDF-Import:** `POST /api/scans` nimmt Bilder und/oder PDFs (jede Seite = ein Blatt) in
+  einem Upload. Seite 2 wird der unmittelbar vorangehenden Seite 1 desselben Stapels
+  zugeordnet (Duplex-Reihenfolge S1, S2, S1, S2 …). Fehlerhafte Seiten werden einzeln gemeldet.
+- Altbestand: Stapel ohne `layout_version` im Snapshot werden weiter im alten Raster gelesen.
 
 ## Tests
 
@@ -83,3 +99,7 @@ uv run pytest -q
 Der Round-Trip-Test generiert synthetisch ausgefüllte Bögen (inkl. Rotation und JPEG-Artefakten),
 liest sie wieder ein und prüft sie gegen den Ground Truth – das validiert die komplette
 geometrische Kette ohne echten Scanner.
+
+## Fragen festlegen
+
+Im Tab „Fragebogen“ legst du Titel, Freitext-Frage und bis zu 30 Fragen fest (Typ Skala oder Auswahl, je 2–5 Antwortoptionen; „Keine Angabe“ wird automatisch ergänzt). Die Fragen liegen in `data/spec.json`; „Auf Standard zurücksetzen“ stellt die mitgelieferten 25 Fragen wieder her. Änderungen gelten nur für neu angelegte Stapel: Jeder Stapel speichert seinen Fragebogen als Snapshot (`data/templates/<stack>.json`), Scans und Auswertung nutzen diesen.

@@ -5,3 +5,4 @@ data/
 !data/.gitkeep
 .pytest_cache/
 *.db
+graphify-out/
