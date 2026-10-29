@@ -11,12 +11,12 @@ from pathlib import Path
 import cv2
 from PIL import Image
 from fastapi import FastAPI, File, HTTPException, UploadFile
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from .auth import auth_middleware, register_auth
-from .config import K_DEFAULT, LOGO_PATH, SCANS_DIR, SPEC_PATH, TEMPLATES_DIR
+from .config import K_DEFAULT, LOGO_PATH, SCANS_DIR, SPEC_PATH, SPECS_DIR, TEMPLATES_DIR
 from .db import get_db, init_db
 from .formgen.generator import intro_fits, label_fits, render_pdf
 from .formgen.layout import LAYOUT_VERSION, MAX_OPTIONS, MAX_QUESTIONS, compute_layout
@@ -29,6 +29,8 @@ UPLOAD_TOO_BIG = "Upload zu groß (max. 100 MB) – bitte in mehreren Teilen hoc
 MAX_SCAN_PAGES = 1000                     # Seiten je Upload
 SCAN_PDF_DPI = 200                        # = CANONICAL_DPI, mehr bringt der Erkennung nichts
 MAX_LOGO_BYTES = 2 * 1024 * 1024
+LOGO_TOO_BIG = "Logo zu groß (max. 2 MB)"
+MULTIPART_OVERHEAD = 1024 * 1024          # Spielraum für Boundaries/Header über dem Nutzlast-Limit
 MAX_LOGO_PIXELS = 25_000_000              # Decompression-Bomb-Schutz
 LOGO_MAX_SIDE = 1200
 PREVIEW_STACK_ID = "0" * 32
@@ -37,6 +39,7 @@ ORPHAN_P2 = ("Freitextseite ohne zugehörige Fragenseite – bitte beide Seiten 
              "zusammen hochladen")
 K_MIN, K_MAX = 2, 100
 _ID_RE = re.compile(r"^[a-f0-9]{32}$")
+_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 def _valid_id(value: str) -> bool:
@@ -49,10 +52,52 @@ async def lifespan(_app: FastAPI):
     init_db()
     SCANS_DIR.mkdir(parents=True, exist_ok=True)
     TEMPLATES_DIR.mkdir(parents=True, exist_ok=True)
+    SPECS_DIR.mkdir(parents=True, exist_ok=True)
     yield
 
 
+class BodyLimitMiddleware:
+    """Reine ASGI-Middleware: bricht zu große Uploads schon beim Empfang ab – bevor
+    Starlette den ganzen Multipart-Body parst (RAM/Platte). Sitzt INNERHALB der Auth,
+    nicht eingeloggte Requests bekommen also weiterhin 401, ohne dass der Body gelesen wird."""
+
+    def __init__(self, asgi_app):
+        self.app = asgi_app
+
+    @staticmethod
+    def _limit(scope) -> tuple[int, str] | None:
+        if scope["type"] != "http" or scope["method"] != "POST":
+            return None
+        if scope["path"] == "/api/scans":
+            return MAX_UPLOAD_BYTES + MULTIPART_OVERHEAD, UPLOAD_TOO_BIG
+        if scope["path"] == "/api/logo":
+            return MAX_LOGO_BYTES + MULTIPART_OVERHEAD, LOGO_TOO_BIG
+        return None
+
+    async def __call__(self, scope, receive, send):
+        lim = self._limit(scope)
+        if lim is None:
+            return await self.app(scope, receive, send)
+        limit, msg = lim
+        declared = dict(scope["headers"]).get(b"content-length", b"")
+        if declared.isdigit() and int(declared) > limit:
+            return await JSONResponse({"detail": msg}, status_code=413)(scope, receive, send)
+        seen = 0
+
+        async def counting_receive():
+            nonlocal seen
+            m = await receive()
+            if m["type"] == "http.request":
+                seen += len(m.get("body", b""))
+                if seen > limit:  # läuft im Handler-Kontext → ExceptionMiddleware antwortet 413
+                    raise HTTPException(413, msg)
+            return m
+
+        await self.app(scope, counting_receive, send)
+
+
 app = FastAPI(title="Mitarbeiterbefragung", version="0.1.0", lifespan=lifespan)
+app.add_middleware(BodyLimitMiddleware)   # zuerst hinzugefügt = innerste Schicht (nach der Auth)
 app.middleware("http")(auth_middleware)
 register_auth(app)
 
@@ -82,6 +127,23 @@ def _stack_spec(stack_id: str | None) -> SurveySpec:
                 legacy.layout_version = 1  # vor den Snapshots gedruckt → altes Layout
                 return legacy
     return _active_spec()
+
+
+def _save_spec_snapshot(spec: SurveySpec) -> None:
+    """Inhaltsadressiert ablegen ({fingerprint}.json), falls noch nicht vorhanden."""
+    h = spec.fingerprint()
+    if _HASH_RE.match(h) and not (SPECS_DIR / f"{h}.json").exists():
+        SPECS_DIR.mkdir(parents=True, exist_ok=True)
+        spec.save(SPECS_DIR / f"{h}.json")
+
+
+def _response_spec(spec_hash: str | None, stack_id: str | None) -> SurveySpec:
+    """Spec, mit der ein Scan gelesen wurde: Hash-Snapshot → Stapel-Snapshot → Standard."""
+    if spec_hash and _HASH_RE.match(spec_hash):
+        snap = SPECS_DIR / f"{spec_hash}.json"
+        if snap.exists():
+            return SurveySpec.load(snap)
+    return _stack_spec(stack_id)
 
 
 def _backfill_hashes(db) -> None:
@@ -115,6 +177,7 @@ def create_stack(body: StackCreate):
     pdf_path = TEMPLATES_DIR / f"{stack_id}.pdf"
     pdf_path.write_bytes(pdf)
     spec.save(TEMPLATES_DIR / f"{stack_id}.json")  # Snapshot: Stapel behält seine Fragen
+    _save_spec_snapshot(spec)
     with get_db() as db:
         db.execute("INSERT INTO stacks (id, department, spec_hash) VALUES (?, ?, ?)",
                    (stack_id, dept, spec.fingerprint()))
@@ -267,8 +330,9 @@ def _store_response(result, image_bytes: bytes) -> dict:
                 spec_hash = known["spec_hash"]
             else:
                 stack_id = None  # unbekannter Stapel → manuell zuordnen
-        if spec_hash is None:  # der Reader hat mit der aktiven Spec gelesen
-            spec_hash = _active_spec().fingerprint()
+        if spec_hash is None:  # der Reader hat mit dieser Spec gelesen – nicht neu auflösen
+            spec_hash = result.spec.fingerprint()
+            _save_spec_snapshot(result.spec)
         db.execute(
             "INSERT INTO responses (id, stack_id, quad_score, spec_hash) VALUES (?, ?, ?, ?)",
             (response_id, stack_id, result.quad_score, spec_hash))
@@ -495,7 +559,7 @@ def response_detail(response_id: str):
             " FROM answers WHERE response_id = ?", (response_id,)).fetchall()
     has_p2 = (SCANS_DIR / f"{response_id}_p2.jpg").exists()
     return {"response": dict(row), "answers": [dict(a) for a in answers],
-            "spec": _spec_dict(_stack_spec(row["stack_id"])),
+            "spec": _spec_dict(_response_spec(row["spec_hash"], row["stack_id"])),
             "image_url": f"/api/responses/{response_id}/image",
             "image2_url": f"/api/responses/{response_id}/image?page=2" if has_p2 else None}
 
@@ -541,7 +605,7 @@ def finalize_response(response_id: str, body: FinalizeBody):
         if read_hash and read_hash != target["spec_hash"]:
             raise HTTPException(409, "Dieser Stapel hat einen anderen Fragebogen – "
                                      "Scan passt nicht")
-        valid_values = {q.id: set(q.answers()) for q in _stack_spec(body.stack_id).questions}
+        valid_values = {q.id: set(q.answers()) for q in _response_spec(row["spec_hash"], body.stack_id).questions}
         for qid, value in body.corrections.items():
             if qid not in valid_values:
                 raise HTTPException(422, f"Unbekannte Frage: {qid}")

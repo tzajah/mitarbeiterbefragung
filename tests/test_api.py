@@ -21,6 +21,7 @@ def client(tmp_path, monkeypatch):
     import app.main as main_mod
     monkeypatch.setattr(main_mod, "SCANS_DIR", tmp_path / "scans")
     monkeypatch.setattr(main_mod, "TEMPLATES_DIR", tmp_path / "templates")
+    monkeypatch.setattr(main_mod, "SPECS_DIR", tmp_path / "specs")
     monkeypatch.setattr(main_mod, "SPEC_PATH", tmp_path / "spec.json")
     monkeypatch.setattr(main_mod, "LOGO_PATH", tmp_path / "logo.png")
     from app.db import DB_PATH as _orig  # noqa: F401  (nur Modulkontext)
@@ -594,3 +595,59 @@ def test_many_pdfs_pair_only_within_file(client):
     assert len(ok) == 3 and all(p["image2_url"] for p in ok)
     errs = [p for p in pages if "error" in p]
     assert len(errs) == 1 and errs[0]["file"] == "nur2.pdf" and errs[0]["file_no"] == 3
+
+
+def test_upload_limit_enforced_on_receive(client, monkeypatch):
+    import app.main as main_mod
+    from starlette import formparsers
+    monkeypatch.setattr(main_mod, "MAX_UPLOAD_BYTES", 1000)
+    monkeypatch.setattr(main_mod, "MULTIPART_OVERHEAD", 0)
+    parsed = []
+    orig = formparsers.MultiPartParser.parse
+
+    async def spy(self):
+        parsed.append(1)
+        return await orig(self)
+    monkeypatch.setattr(formparsers.MultiPartParser, "parse", spy)
+    # Content-Length schon zu groß → Ablehnung ohne Parsing
+    r = client.post("/api/scans", files={"file": ("a.jpg", b"x" * 5000, "image/jpeg")})
+    assert r.status_code == 413 and "max. 100 MB" in r.json()["detail"] and not parsed
+    # ohne Content-Length (chunked) → Abbruch beim Empfang
+    body = (b'--B\r\nContent-Disposition: form-data; name="file"; filename="a.jpg"\r\n\r\n'
+            + b"x" * 5000 + b"\r\n--B--\r\n")
+    r = client.post("/api/scans", content=iter([body[:2000], body[2000:]]),
+                    headers={"Content-Type": "multipart/form-data; boundary=B"})
+    assert r.status_code == 413 and "max. 100 MB" in r.json()["detail"]
+
+
+def test_store_uses_spec_from_read(client):
+    """Hash kommt von der beim Lesen verwendeten Spec, nicht von der aktuell aktiven."""
+    import app.main as main_mod
+    from app.scan.reader import ReadResult
+    spec = default_spec()
+    res = ReadResult(stack_id=None, quad_score=0.9, answers=[], warnings=[], spec=spec)
+    r = main_mod._store_response(res, b"\xff\xd8\xff")  # JPEG-Magic genügt
+    h = client.get(f"/api/responses/{r['response_id']}").json()["response"]["spec_hash"]
+    assert h == spec.fingerprint()
+
+
+def test_review_uses_spec_used_at_scan(client):
+    import app.main as main_mod
+    from app.formgen.layout import QR_BOX_MM
+    rng = np.random.default_rng(7)
+    choice = {"title": "A", "free_text_prompt": "F",
+              "questions": [{"text": "Q?", "kind": "choice", "options": ["ja", "nein"]}]}
+    assert client.put("/api/spec", json=choice).status_code == 200
+    stack = client.post("/api/stacks", json={"department": "IT"}).json()
+    pdf = client.get(stack["pdf_url"]).content
+    img = fill_form(render_pdf_to_image(pdf), main_mod._active_spec(), {"q01": 0}, rng=rng)
+    x0, y0, x1, y1 = (int(v / 25.4 * 150) for v in QR_BOX_MM)
+    img[y0 - 3:y1 + 3, x0 - 3:x1 + 3] = 255  # QR übermalen → Stapel unbekannt
+    scan = simulate_scan(img, rng=rng)
+    up = client.post("/api/scans", files={"file": ("s.jpg", scan, "image/jpeg")}).json()
+    assert up["stack_id"] is None
+    other = {**choice, "questions": [{"text": "Q?", "kind": "choice",
+                                      "options": ["rot", "blau", "gelb"]}]}
+    assert client.put("/api/spec", json=other).status_code == 200
+    d = client.get(f"/api/responses/{up['response_id']}").json()
+    assert d["spec"]["questions"][0]["answers"][:2] == ["ja", "nein"]

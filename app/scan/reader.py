@@ -48,6 +48,7 @@ class ReadResult:
     answers: list[AnswerReading]
     warnings: list[str]
     page: int = 1           # 1 = Fragen, 2 = Freitext (aus dem QR; unlesbar → 1)
+    spec: object = None     # die beim Lesen tatsächlich verwendete Spec (Seite 1)
 
     @property
     def needs_review(self) -> bool:
@@ -226,7 +227,9 @@ def read_scan(image_bytes: bytes, spec) -> ReadResult:
         # ponytail: unlesbarer QR gilt als Seite 1 – landet ohnehin im Review
         warnings.append("QR-Code nicht lesbar – Stapel muss manuell zugeordnet werden")
 
-    answers = [] if page == 2 else _read_bubbles(
-        warped_gray, spec(stack_id) if callable(spec) else spec)
+    used, answers = None, []
+    if page != 2:
+        used = spec(stack_id) if callable(spec) else spec  # genau einmal auflösen
+        answers = _read_bubbles(warped_gray, used)
     return ReadResult(stack_id=stack_id, quad_score=round(score, 4),
-                      answers=answers, warnings=warnings, page=page)
+                      answers=answers, warnings=warnings, page=page, spec=used)

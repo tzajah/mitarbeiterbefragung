@@ -23,6 +23,9 @@
   Fragebögen, die nicht auf eine Seite passen, werden beim Speichern abgelehnt.
 - Upload-Limit: max. 100 MB je Upload (Summe aller Dateien), max. 1000 Seiten.
 - Gespeicherte Scans sind immer JPEG.
+- Upload-Limit (Scans, Logo) wird schon beim Empfang durchgesetzt, nicht erst nach dem Parsen.
+- Review nutzt immer den beim Scan verwendeten Fragebogen (auch für Scans ohne lesbaren QR;
+  Snapshots inhaltsadressiert unter `data/specs/`).
 
 ### Kompatibilität
 - Bereits angelegte Stapel (ohne `layout_version`) werden weiter mit dem alten Raster gelesen.
