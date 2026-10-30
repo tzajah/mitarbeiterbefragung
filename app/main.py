@@ -15,7 +15,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from .auth import auth_middleware, register_auth
+from .auth import auth_middleware, check_auth_config, register_auth
 from .config import K_DEFAULT, LOGO_PATH, SCANS_DIR, SPEC_PATH, SPECS_DIR, TEMPLATES_DIR
 from .db import get_db, init_db
 from .formgen.generator import intro_fits, label_fits, render_pdf
@@ -49,6 +49,7 @@ def _valid_id(value: str) -> bool:
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    check_auth_config()
     init_db()
     SCANS_DIR.mkdir(parents=True, exist_ok=True)
     TEMPLATES_DIR.mkdir(parents=True, exist_ok=True)

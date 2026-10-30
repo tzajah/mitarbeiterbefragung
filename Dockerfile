@@ -14,6 +14,8 @@ RUN pip install --no-cache-dir uv && uv sync --frozen --no-dev
 COPY app ./app
 
 ENV PYTHONUNBUFFERED=1
+# Im Container ist ein Passwort Pflicht (App startet sonst nicht)
+ENV APP_REQUIRE_AUTH=1
 EXPOSE 8765
 # Persistente Daten (DB, Scans, Stapel-PDFs) liegen im Volume
 VOLUME ["/app/data"]

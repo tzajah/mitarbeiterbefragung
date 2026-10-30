@@ -59,11 +59,12 @@ APP_USER=admin APP_PASSWORD=... uv run uvicorn app.main:app --host 0.0.0.0 --por
 ### Docker / Docker Compose
 
 ```bash
-cp .env.example .env       # Passwort/Hash eintragen
+cp .env.example .env       # Passwort/Hash eintragen  (Pflicht – ohne Passwort startet der Container nicht)
 docker compose up -d --build
 # → http://<server-ip>:8765
 ```
 
+- Im Container ist `APP_REQUIRE_AUTH=1` gesetzt: ohne `APP_PASSWORD`/`APP_PASSWORD_HASH` bricht der Start mit Fehlermeldung ab. Lokal mit `uv run` bleibt die App ohne Passwort offen.
 - Daten (SQLite, Scans, Stapel-PDFs) liegen im Volume `./data` → Backup = Ordner sichern.
 - `restart: unless-stopped` hält den Dienst über Neustarts hinweg am Leben.
 - Für HTTPS: Reverse-Proxy vorschalten (z. B. Caddy/nginx) – die App selbst bleibt HTTP.
@@ -125,3 +126,8 @@ liest sie wieder ein und prüft sie gegen den Ground Truth – das validiert die
 geometrische Kette ohne echten Scanner.
 
 Änderungen: siehe [CHANGELOG.md](CHANGELOG.md).
+
+## Lizenz
+
+[GNU AGPL-3.0-or-later](LICENSE). Wer die App verändert und als Webdienst anbietet, muss den
+geänderten Quellcode den Nutzern dieses Dienstes zugänglich machen.

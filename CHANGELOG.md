@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-10-30 – Veröffentlichung
+
+- Lizenz: GNU AGPL-3.0-or-later (`LICENSE`, `pyproject.toml`, README).
+- Login-Pflicht im Docker-Betrieb: `APP_REQUIRE_AUTH=1` im Image; ohne Passwort/Hash bricht der Start ab.
+- Diagnose-Skripte (`scripts/diag_*.py`) entfernt.
+- Neutrale Beispieldaten in Tests und README; `.env` in `.gitignore`.
+
 ## 2026-10-29 – Fragebogen-Editor, neues Bogen-Design, PDF-Import
 
 ### Neu

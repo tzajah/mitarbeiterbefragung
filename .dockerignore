@@ -4,6 +4,5 @@
 .pytest_cache/
 data/
 tests/
-scripts/
 *.md
 !README.md

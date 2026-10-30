@@ -7,7 +7,7 @@ services:
     volumes:
       - ./data:/app/data
     environment:
-      # Login-Schutz (aktiv, sobald APP_PASSWORD gesetzt ist)
+      # Login-Schutz: Im Container Pflicht – ohne APP_PASSWORD oder APP_PASSWORD_HASH startet die App nicht
       - APP_USER=${APP_USER:-admin}
       - APP_PASSWORD=${APP_PASSWORD:-}
       # Empfohlen statt Klartext: scrypt-Hash (Generierung siehe README)

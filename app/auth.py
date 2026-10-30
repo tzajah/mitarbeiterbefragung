@@ -49,6 +49,14 @@ def auth_enabled() -> bool:
     return bool(_env("APP_PASSWORD") or _env("APP_PASSWORD_HASH"))
 
 
+def check_auth_config() -> None:
+    """Bricht den Start ab, wenn APP_REQUIRE_AUTH gesetzt ist, aber kein Passwort."""
+    if (_env("APP_REQUIRE_AUTH") or "").lower() in ("1", "true") and not auth_enabled():
+        raise RuntimeError(
+            "APP_REQUIRE_AUTH ist gesetzt, aber kein APP_PASSWORD/APP_PASSWORD_HASH – "
+            "Start abgebrochen. Siehe .env.example")
+
+
 def _secret() -> bytes:
     own = _env("APP_SECRET")
     if own:

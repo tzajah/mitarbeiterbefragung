@@ -719,3 +719,21 @@ def test_legacy_response_with_broken_snapshot_gives_409(client):
         db.execute("INSERT INTO responses (id, stack_id) VALUES (?, ?)", (rid, stack["stack_id"]))
     (main_mod.TEMPLATES_DIR / f"{stack['stack_id']}.json").write_text("{", encoding="utf-8")
     assert client.get(f"/api/responses/{rid}").status_code == 409
+
+
+def test_require_auth_ohne_passwort_bricht_start_ab(tmp_path, monkeypatch):
+    monkeypatch.setenv("APP_REQUIRE_AUTH", "1")
+    monkeypatch.delenv("APP_PASSWORD", raising=False)
+    monkeypatch.delenv("APP_PASSWORD_HASH", raising=False)
+    with pytest.raises(RuntimeError, match="APP_REQUIRE_AUTH ist gesetzt"):
+        with TestClient(app):
+            pass
+    monkeypatch.setenv("APP_PASSWORD", "x")
+    monkeypatch.setenv("APP_SECRET", "s")
+    import app.main as main_mod
+    for n in ("SCANS_DIR", "TEMPLATES_DIR", "SPECS_DIR"):
+        monkeypatch.setattr(main_mod, n, tmp_path / n)
+    import app.db as db_mod
+    monkeypatch.setattr(db_mod, "DB_PATH", tmp_path / "t.db")
+    with TestClient(app) as c:
+        assert c.get("/api/health").json()["auth"] is True
