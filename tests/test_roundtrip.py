@@ -223,3 +223,41 @@ def test_roundtrip_long_labels_v3():
     for r in result.answers:
         assert r.value == spec_q_label(spec, r.question_id, answers[r.question_id])
         assert not r.needs_review
+
+
+HYPH = ["Einschränkungen", "Mitarbeiterzufriedenheit"]
+
+
+def test_hyphenation_long_words():
+    from app.formgen.generator import label_fits
+    from app.formgen.layout import COL_W, HEAD_FONT, HEAD_SIZE, pts, wrap
+    from reportlab.pdfbase.pdfmetrics import stringWidth
+    for lb in HYPH + ["sehr " + HYPH[0]]:
+        assert label_fits(lb)
+        lines, ok = wrap(lb, HEAD_FONT, HEAD_SIZE, COL_W - 1.2, 6, True)
+        assert ok and lines[0].endswith("-")
+        assert all(stringWidth(s, HEAD_FONT, HEAD_SIZE) <= pts(COL_W - 1.2) for s in lines)
+        assert all(s.endswith("-") for s in lines[:-1]) or " " in lb
+        print(lines)
+
+
+def test_hyphenation_keeps_normal_labels():
+    from app.formgen.layout import COL_W, HEAD_FONT, HEAD_SIZE, wrap
+    for lb in [LONG, "eher ja", "ja", "stimme voll und ganz zu", "überhaupt nicht zufrieden"]:
+        assert (wrap(lb, HEAD_FONT, HEAD_SIZE, COL_W - 1.2, 6, True)
+                == wrap(lb, HEAD_FONT, HEAD_SIZE, COL_W - 1.2, 6))
+
+
+def test_roundtrip_hyphenated_label_v3():
+    from app.formgen.spec import Question, SurveySpec
+    labels = [HYPH[1], "eher ja", HYPH[0]]
+    qs = [Question(f"q{i:02d}", f"Frage {i}", "scale", scale_labels=labels) for i in range(1, 4)]
+    spec = SurveySpec("Trennung", qs)
+    sid = new_stack_id()
+    rng = np.random.default_rng(5)
+    answers = {q.id: int(rng.integers(0, len(q.answers()))) for q in spec.questions}
+    img = fill_form(render_pdf_to_image(render_pdf(spec, sid)), spec, answers, rng=rng)
+    result = read_scan(simulate_scan(img, rng=rng), spec)
+    for r in result.answers:
+        assert r.value == spec_q_label(spec, r.question_id, answers[r.question_id])
+        assert not r.needs_review

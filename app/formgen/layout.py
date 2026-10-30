@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+import pyphen
 from reportlab.pdfbase.pdfmetrics import stringWidth
 
 PAGE_W_MM = 210.0
@@ -74,17 +75,46 @@ def fit_text(text: str, font: str, size: float, max_width_mm: float) -> str:
     return text + "…"
 
 
+_DIC = pyphen.Pyphen(lang="de_DE")
+
+
+def _split_word(word: str, font: str, size: float, space_pts: float) -> int:
+    """Länge des längsten Wortanfangs, der mit '-' in space_pts passt (0 = keiner).
+    Bevorzugt Silbentrennstellen, sonst hartes Trennen nach Zeichen."""
+    fits = lambda k: stringWidth(word[:k] + "-", font, size) <= space_pts
+    for k in sorted(_DIC.positions(word), reverse=True):
+        if fits(k):
+            return k
+    return next((k for k in range(len(word) - 1, 0, -1) if fits(k)), 0)
+
+
 def wrap(text: str, font: str, size: float, width_mm: float,
-          max_lines: int) -> tuple[list[str], bool]:
-    """Wortweiser Umbruch; (Zeilen, passt_vollständig). Rest → Ellipse in der letzten Zeile."""
+          max_lines: int, hyphenate: bool = False) -> tuple[list[str], bool]:
+    """Wortweiser Umbruch; (Zeilen, passt_vollständig). Rest → Ellipse in der letzten Zeile.
+
+    hyphenate: Wörter, die allein breiter als eine Zeile sind, werden mit '-' getrennt;
+    alle übrigen Wörter brechen exakt wie ohne (Kopfzeilenhöhe gedruckter Stapel bleibt)."""
     max_pts, lines, cur = pts(width_mm), [], ""
     for word in text.split():
         cand = f"{cur} {word}".strip()
         if stringWidth(cand, font, size) <= max_pts:
             cur = cand
             continue
-        if cur:
+        if hyphenate and stringWidth(word, font, size) > max_pts:
+            while stringWidth(word, font, size) > max_pts:
+                used = stringWidth(cur + " ", font, size) if cur else 0.0
+                k = _split_word(word, font, size, max_pts - used)
+                if not k and cur:   # Restbreite reicht nicht → neue Zeile
+                    lines.append(cur)
+                    cur, used = "", 0.0
+                    k = _split_word(word, font, size, max_pts)
+                if not k:           # Zeile schmaler als ein Zeichen: nicht trennbar
+                    break
+                lines.append(f"{cur} {word[:k]}-".strip())
+                cur, word = "", word[k:]
+        elif cur:
             lines.append(cur)
+            cur = ""
         cur = word
     if cur:
         lines.append(cur)
@@ -97,7 +127,7 @@ def wrap(text: str, font: str, size: float, width_mm: float,
 
 def head_height(labels: list[str]) -> float:
     """v3: Kopfzeilenhöhe nach Zeilenzahl des längsten Labels (2 Zeilen = HEAD_H)."""
-    n = max(len(wrap(lb, HEAD_FONT, HEAD_SIZE, COL_W - 1.2, HEAD_MAX_LINES)[0]) for lb in labels)
+    n = max(len(wrap(lb, HEAD_FONT, HEAD_SIZE, COL_W - 1.2, HEAD_MAX_LINES, True)[0]) for lb in labels)
     return max(HEAD_H, HEAD_LINE_H * n + 2.8)
 
 

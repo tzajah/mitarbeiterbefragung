@@ -502,7 +502,7 @@ def _spec_from_input(body: SpecIn) -> SurveySpec:
                 raise HTTPException(422, f"{where}: '{NO_ANSWER}' wird automatisch ergänzt")
             if not label_fits(o):
                 raise HTTPException(422, f"{where}: Option '{o}' ist zu lang für die Spalte "
-                                         "(max. sechs Zeilen à ca. 12 Zeichen; einzelne Wörter höchstens ca. 12 Zeichen)")
+                                         "(max. sechs Zeilen à ca. 12 Zeichen)")
         qs.append(Question(id=f"q{i:02d}", text=text, kind=q.kind,
                            options=opts if q.kind == "choice" else [],
                            scale_labels=opts if q.kind == "scale" else []))

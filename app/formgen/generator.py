@@ -56,7 +56,7 @@ def Y(y_mm_from_top: float) -> float:
 
 def label_fits(label: str) -> bool:
     """Passt ein Optionslabel (max. HEAD_MAX_LINES Zeilen) in die Spalte der Kopfzeile?"""
-    return _wrap(label, HEAD_FONT, HEAD_SIZE, COL_W - 1.2, HEAD_MAX_LINES)[1]
+    return _wrap(label, HEAD_FONT, HEAD_SIZE, COL_W - 1.2, HEAD_MAX_LINES, True)[1]
 
 
 def intro_fits(text: str) -> bool:
@@ -169,7 +169,7 @@ def _draw_tables(c: canvas.Canvas, spec: SurveySpec) -> None:
         c.setFont(HEAD_FONT, HEAD_SIZE)
         for label, x in zip(h.labels, h.xs):
             lines, _ = _wrap(label, HEAD_FONT, HEAD_SIZE, COL_W - 1.2,
-                             HEAD_MAX_LINES if lay.version >= 3 else 2)
+                             HEAD_MAX_LINES if lay.version >= 3 else 2, lay.version >= 3)
             if lay.version >= 3:
                 base = mid + 0.75 - (len(lines) - 1) * HEAD_LINE_H / 2   # Textblock vertikal zentriert
             else:  # v2-Druckbild unverändert lassen

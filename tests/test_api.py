@@ -252,7 +252,7 @@ def test_spec_validation_and_reset(client):
     assert put(scale_labels=["a", "b", "c", "d", "e", "f"]) == 422
     assert put(text="   ") == 422
     assert put(kind="matrix") == 422
-    assert put(scale_labels=["a", "x" * 40]) == 422
+    assert put(scale_labels=["a", "x" * 80]) == 422
     assert put() == 200
     assert client.post("/api/spec/reset").json()["title"] == default_spec().title
     assert client.get("/api/spec").json()["questions"][0]["id"] == "q01"
