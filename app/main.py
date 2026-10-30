@@ -129,14 +129,20 @@ def _stack_spec(stack_id: str | None) -> SurveySpec:
     """Spec, mit der der Stapel gedruckt wurde. Altbestand ohne Snapshot → Standard;
     unbekannter/fehlender Stapel → aktive Spec."""
     if stack_id and _valid_id(stack_id):
-        snap = _try_load(TEMPLATES_DIR / f"{stack_id}.json")
+        path = TEMPLATES_DIR / f"{stack_id}.json"
+        snap = _try_load(path)
         if snap is not None:
             return snap
         with get_db() as db:
-            if db.execute("SELECT 1 FROM stacks WHERE id = ?", (stack_id,)).fetchone():
-                legacy = default_spec()
-                legacy.layout_version = 1  # vor den Snapshots gedruckt → altes Layout
-                return legacy
+            row = db.execute("SELECT spec_hash FROM stacks WHERE id = ?", (stack_id,)).fetchone()
+        if row and path.exists():
+            # Snapshot vorhanden, aber kaputt: kein Ausweichen auf eine andere Spec – der
+            # Fingerprint enthält das Layout nicht, jede Ersatz-Spec könnte falsche Kreuzpositionen haben
+            raise ValueError("Fragebogen-Snapshot des Stapels ist beschädigt – Scan nicht auswertbar")
+        if row:
+            legacy = default_spec()
+            legacy.layout_version = 1  # vor den Snapshots gedruckt → altes Layout
+            return legacy
     try:
         return _active_spec()
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
@@ -158,7 +164,10 @@ def _response_spec(spec_hash: str | None, stack_id: str | None) -> SurveySpec:
     Hash-Snapshot → Stapel-Snapshot → alle Stapel-Snapshots → aktive Spec → 409.
     Ohne Hash (Altbestand): Stapel-Snapshot bzw. Standard."""
     if not (spec_hash and _HASH_RE.match(spec_hash)):
-        return _stack_spec(stack_id)
+        try:
+            return _stack_spec(stack_id)
+        except ValueError as e:
+            raise HTTPException(409, str(e))
     snap = _try_load(SPECS_DIR / f"{spec_hash}.json")
     if snap is not None and snap.fingerprint() == spec_hash:
         return snap
@@ -180,8 +189,11 @@ def _response_spec(spec_hash: str | None, stack_id: str | None) -> SurveySpec:
 def _backfill_hashes(db) -> None:
     """Altbestand: Fingerprint aus Snapshot bzw. Standard-Spec nachtragen."""
     for r in db.execute("SELECT id FROM stacks WHERE spec_hash IS NULL").fetchall():
-        db.execute("UPDATE stacks SET spec_hash = ? WHERE id = ?",
-                   (_stack_spec(r["id"]).fingerprint(), r["id"]))
+        try:
+            h = _stack_spec(r["id"]).fingerprint()
+        except ValueError:
+            continue  # kaputter Snapshot ohne Hash: bleibt unausgewertet statt falsch
+        db.execute("UPDATE stacks SET spec_hash = ? WHERE id = ?", (h, r["id"]))
 
 
 def _spec_dict(spec: SurveySpec) -> dict:
@@ -401,7 +413,10 @@ def demo_scan(stack_id: str):
     import pypdfium2 as pdfium
     from .scan.synth import fill_form, render_pdf_to_image, scribble, simulate_scan
     rng = np.random.default_rng()
-    spec = _stack_spec(stack_id)
+    try:
+        spec = _stack_spec(stack_id)
+    except ValueError as e:
+        raise HTTPException(409, str(e))
     pdf = pdf_path.read_bytes()
     answers = {q.id: (int(rng.integers(0, len(q.answers())))
                       if rng.random() > 0.15 else None)
@@ -666,7 +681,8 @@ def results(k: int = K_DEFAULT):
             SELECT st.department AS dept, st.spec_hash AS h, COUNT(*) AS n,
                    MIN(st.created_at) AS since
             FROM responses r JOIN stacks st ON st.id = r.stack_id
-            WHERE r.finalized = 1 GROUP BY st.department, st.spec_hash
+            WHERE r.finalized = 1 AND st.spec_hash IS NOT NULL
+            GROUP BY st.department, st.spec_hash
             ORDER BY st.department, since
         """).fetchall()
         out = []
@@ -680,7 +696,7 @@ def results(k: int = K_DEFAULT):
                     " ORDER BY created_at DESC, rowid DESC LIMIT 1",
                     (g["dept"], g["h"])).fetchone()
                 entry["questions"] = [{"id": q.id, "text": q.text}
-                                      for q in _stack_spec(latest["id"]).questions]
+                                      for q in _response_spec(g["h"], latest["id"]).questions]
                 rows = db.execute("""
                     SELECT a.question_id, a.value, COUNT(*) AS c
                     FROM answers a JOIN responses r ON r.id = a.response_id

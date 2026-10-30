@@ -683,3 +683,39 @@ def test_response_spec_fallbacks(client):
     with pytest.raises(main_mod.HTTPException) as e:
         main_mod._response_spec(ha, None)
     assert e.value.status_code == 409
+
+
+def test_broken_stack_snapshot_never_falls_back_to_legacy(client):
+    import app.main as main_mod
+    stack = client.post("/api/stacks", json={"department": "IT"}).json()
+    sid = stack["stack_id"]
+    (main_mod.TEMPLATES_DIR / f"{sid}.json").write_text("{kaputt", encoding="utf-8")
+    # Fehler statt Lesen an falschen Kreuzpositionen (kein Alt-Layout, keine Ersatz-Spec)
+    with pytest.raises(ValueError):
+        main_mod._stack_spec(sid)
+    assert client.post(f"/api/stacks/{sid}/demo").status_code == 409
+
+
+def test_results_skip_stacks_without_hash(client):
+    import app.db as db_mod
+    stack = client.post("/api/stacks", json={"department": "IT"}).json()
+    with db_mod.get_db() as db:
+        db.execute("INSERT INTO responses (id, stack_id, finalized) VALUES (?, ?, 1)",
+                   ("e" * 32, stack["stack_id"]))
+        db.execute("UPDATE stacks SET spec_hash = NULL")
+    # Backfill schlägt fehl (kaputter Snapshot) → Hash bleibt NULL, Auswertung darf nicht abstürzen
+    import app.main as main_mod
+    (main_mod.TEMPLATES_DIR / f"{stack['stack_id']}.json").write_text("{", encoding="utf-8")
+    r = client.get("/api/results")
+    assert r.status_code == 200 and r.json()["departments"] == []
+
+
+def test_legacy_response_with_broken_snapshot_gives_409(client):
+    import app.db as db_mod
+    import app.main as main_mod
+    stack = client.post("/api/stacks", json={"department": "IT"}).json()
+    rid = "d" * 32
+    with db_mod.get_db() as db:
+        db.execute("INSERT INTO responses (id, stack_id) VALUES (?, ?)", (rid, stack["stack_id"]))
+    (main_mod.TEMPLATES_DIR / f"{stack['stack_id']}.json").write_text("{", encoding="utf-8")
+    assert client.get(f"/api/responses/{rid}").status_code == 409
