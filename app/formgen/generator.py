@@ -170,7 +170,10 @@ def _draw_tables(c: canvas.Canvas, spec: SurveySpec) -> None:
         for label, x in zip(h.labels, h.xs):
             lines, _ = _wrap(label, HEAD_FONT, HEAD_SIZE, COL_W - 1.2,
                              HEAD_MAX_LINES if lay.version >= 3 else 2)
-            base = mid + 0.75 - (len(lines) - 1) * HEAD_LINE_H / 2   # Textblock vertikal zentriert
+            if lay.version >= 3:
+                base = mid + 0.75 - (len(lines) - 1) * HEAD_LINE_H / 2   # Textblock vertikal zentriert
+            else:  # v2-Druckbild unverändert lassen
+                base = mid + 0.75 if len(lines) == 1 else mid - 0.45
             for k, line in enumerate(lines):
                 c.drawCentredString(x * mm, Y(base + k * HEAD_LINE_H), line)
     c.setFillColorRGB(0, 0, 0)

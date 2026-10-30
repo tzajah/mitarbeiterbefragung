@@ -154,7 +154,10 @@ def compute_layout(spec) -> Layout:
             groups.append([q])
     v3 = getattr(spec, "layout_version", LAYOUT_VERSION) >= 3
     heads = [head_height(g[0].answers()) if v3 else HEAD_H for g in groups]
-    fixed = sum(heads) + len(groups) * HEAD_GAP + (len(groups) - 1) * GROUP_GAP
+    if v3:
+        fixed = sum(heads) + len(groups) * HEAD_GAP + (len(groups) - 1) * GROUP_GAP
+    else:  # v2: alte Rechenreihenfolge, sonst weichen Gleitkomma-Koordinaten gedruckter Stapel ab
+        fixed = len(groups) * (HEAD_H + HEAD_GAP) + (len(groups) - 1) * GROUP_GAP
     pitch = min(PITCH_MAX, (TABLE_Y1 - TABLE_Y0 - fixed) / max(1, len(spec.questions)))
     if pitch < PITCH_MIN:
         raise ValueError(NOT_FIT_MSG)
