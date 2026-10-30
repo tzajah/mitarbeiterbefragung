@@ -42,7 +42,7 @@ class LoginBody(BaseModel):
 
 def _env(name: str) -> str | None:
     v = os.environ.get(name)
-    return v if v else None
+    return v if v and v.strip() else None  # nur Leerzeichen = nicht gesetzt; sonst Wert unverändert
 
 
 def auth_enabled() -> bool:
@@ -50,11 +50,27 @@ def auth_enabled() -> bool:
 
 
 def check_auth_config() -> None:
-    """Bricht den Start ab, wenn APP_REQUIRE_AUTH gesetzt ist, aber kein Passwort."""
-    if (_env("APP_REQUIRE_AUTH") or "").lower() in ("1", "true") and not auth_enabled():
+    """Bricht den Start ab bei unklarem APP_REQUIRE_AUTH, ungültigem Hash oder
+    gefordertem, aber fehlendem Passwort."""
+    flag = (_env("APP_REQUIRE_AUTH") or "0").strip().lower()
+    if flag not in ("0", "1", "false", "true"):
+        raise RuntimeError(f"APP_REQUIRE_AUTH={flag!r} ungültig – erlaubt: 0/1/false/true")
+    h = _env("APP_PASSWORD_HASH")
+    if h and not _hash_ok(h):
+        raise RuntimeError("APP_PASSWORD_HASH hat kein gültiges scrypt-Format – siehe README")
+    if flag in ("1", "true") and not auth_enabled():
         raise RuntimeError(
             "APP_REQUIRE_AUTH ist gesetzt, aber kein APP_PASSWORD/APP_PASSWORD_HASH – "
             "Start abgebrochen. Siehe .env.example")
+
+
+def _hash_ok(h: str) -> bool:
+    try:
+        algo, n, r, p, salt_hex, hash_hex = h.split("$")
+        return (algo == "scrypt" and min(int(n), int(r), int(p)) > 0
+                and len(bytes.fromhex(salt_hex)) > 0 and len(bytes.fromhex(hash_hex)) > 0)
+    except ValueError:
+        return False
 
 
 def _secret() -> bytes:

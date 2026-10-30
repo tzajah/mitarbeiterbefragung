@@ -737,3 +737,26 @@ def test_require_auth_ohne_passwort_bricht_start_ab(tmp_path, monkeypatch):
     monkeypatch.setattr(db_mod, "DB_PATH", tmp_path / "t.db")
     with TestClient(app) as c:
         assert c.get("/api/health").json()["auth"] is True
+
+
+@pytest.mark.parametrize("env, match", [
+    ({"APP_REQUIRE_AUTH": " 1 ", "APP_PASSWORD": "   "}, "APP_REQUIRE_AUTH ist gesetzt"),
+    ({"APP_REQUIRE_AUTH": "ja"}, "ungültig"),
+    ({"APP_REQUIRE_AUTH": "1", "APP_PASSWORD_HASH": "kaputt"}, "scrypt-Format"),
+])
+def test_auth_config_randfaelle(monkeypatch, env, match):
+    from app.auth import check_auth_config
+    for k in ("APP_REQUIRE_AUTH", "APP_PASSWORD", "APP_PASSWORD_HASH"):
+        monkeypatch.delenv(k, raising=False)
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+    with pytest.raises(RuntimeError, match=match):
+        check_auth_config()
+
+
+def test_password_with_spaces_kept(monkeypatch):
+    from app.auth import verify_password
+    monkeypatch.delenv("APP_PASSWORD_HASH", raising=False)
+    monkeypatch.delenv("APP_USER", raising=False)
+    monkeypatch.setenv("APP_PASSWORD", " geheim ")
+    assert verify_password("admin", " geheim ") and not verify_password("admin", "geheim")
