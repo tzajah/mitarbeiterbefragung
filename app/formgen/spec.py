@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -113,7 +115,15 @@ class SurveySpec:
                                          separators=(",", ":")).encode("utf-8")).hexdigest()
 
     def save(self, path: Path) -> None:
-        path.write_text(json.dumps(self.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
+        """Atomar: Temp-Datei im selben Verzeichnis, dann os.replace (kein halbes JSON bei Abbruch)."""
+        fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(json.dumps(self.to_dict(), ensure_ascii=False, indent=2))
+            os.replace(tmp, path)
+        except BaseException:
+            Path(tmp).unlink(missing_ok=True)
+            raise
 
     @classmethod
     def load(cls, path: Path) -> "SurveySpec":

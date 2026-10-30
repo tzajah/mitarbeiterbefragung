@@ -68,9 +68,12 @@ class BodyLimitMiddleware:
     def _limit(scope) -> tuple[int, str] | None:
         if scope["type"] != "http" or scope["method"] != "POST":
             return None
-        if scope["path"] == "/api/scans":
+        path, root = scope["path"], scope.get("root_path", "")
+        if root and path.startswith(root):  # --root-path: routenrelativ vergleichen (wie Starlette)
+            path = path[len(root):]
+        if path == "/api/scans":
             return MAX_UPLOAD_BYTES + MULTIPART_OVERHEAD, UPLOAD_TOO_BIG
-        if scope["path"] == "/api/logo":
+        if path == "/api/logo":
             return MAX_LOGO_BYTES + MULTIPART_OVERHEAD, LOGO_TOO_BIG
         return None
 
@@ -114,36 +117,64 @@ def _logo() -> bytes | None:
     return LOGO_PATH.read_bytes() if LOGO_PATH.exists() else None
 
 
+def _try_load(path: Path) -> SurveySpec | None:
+    """Snapshot lesen; fehlend/unlesbar/ungültig → None (Aufrufer fällt auf nächste Quelle zurück)."""
+    try:
+        return SurveySpec.load(path)
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return None
+
+
 def _stack_spec(stack_id: str | None) -> SurveySpec:
     """Spec, mit der der Stapel gedruckt wurde. Altbestand ohne Snapshot → Standard;
     unbekannter/fehlender Stapel → aktive Spec."""
     if stack_id and _valid_id(stack_id):
-        snap = TEMPLATES_DIR / f"{stack_id}.json"
-        if snap.exists():
-            return SurveySpec.load(snap)
+        snap = _try_load(TEMPLATES_DIR / f"{stack_id}.json")
+        if snap is not None:
+            return snap
         with get_db() as db:
             if db.execute("SELECT 1 FROM stacks WHERE id = ?", (stack_id,)).fetchone():
                 legacy = default_spec()
                 legacy.layout_version = 1  # vor den Snapshots gedruckt → altes Layout
                 return legacy
-    return _active_spec()
+    try:
+        return _active_spec()
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return default_spec()
 
 
 def _save_spec_snapshot(spec: SurveySpec) -> None:
-    """Inhaltsadressiert ablegen ({fingerprint}.json), falls noch nicht vorhanden."""
+    """Inhaltsadressiert ablegen ({fingerprint}.json); unlesbare/falsche Datei wird ersetzt."""
     h = spec.fingerprint()
-    if _HASH_RE.match(h) and not (SPECS_DIR / f"{h}.json").exists():
+    if _HASH_RE.match(h):
         SPECS_DIR.mkdir(parents=True, exist_ok=True)
-        spec.save(SPECS_DIR / f"{h}.json")
+        old = _try_load(SPECS_DIR / f"{h}.json")
+        if old is None or old.fingerprint() != h:
+            spec.save(SPECS_DIR / f"{h}.json")
 
 
 def _response_spec(spec_hash: str | None, stack_id: str | None) -> SurveySpec:
-    """Spec, mit der ein Scan gelesen wurde: Hash-Snapshot → Stapel-Snapshot → Standard."""
-    if spec_hash and _HASH_RE.match(spec_hash):
-        snap = SPECS_DIR / f"{spec_hash}.json"
-        if snap.exists():
-            return SurveySpec.load(snap)
-    return _stack_spec(stack_id)
+    """Spec, mit der ein Scan gelesen wurde. Mit Hash nur eine Spec mit passendem Fingerprint:
+    Hash-Snapshot → Stapel-Snapshot → alle Stapel-Snapshots → aktive Spec → 409.
+    Ohne Hash (Altbestand): Stapel-Snapshot bzw. Standard."""
+    if not (spec_hash and _HASH_RE.match(spec_hash)):
+        return _stack_spec(stack_id)
+    snap = _try_load(SPECS_DIR / f"{spec_hash}.json")
+    if snap is not None and snap.fingerprint() == spec_hash:
+        return snap
+    if stack_id and _valid_id(stack_id):
+        snap = _try_load(TEMPLATES_DIR / f"{stack_id}.json")
+        if snap is not None and snap.fingerprint() == spec_hash:
+            return snap
+    for p in TEMPLATES_DIR.glob("*.json"):
+        snap = _try_load(p)
+        if snap is not None and snap.fingerprint() == spec_hash:
+            _save_spec_snapshot(snap)
+            return snap
+    for cand in (_stack_spec(None), default_spec()):
+        if cand.fingerprint() == spec_hash:
+            return cand
+    raise HTTPException(409, "Original-Fragebogen dieses Scans ist nicht mehr verfügbar")
 
 
 def _backfill_hashes(db) -> None:

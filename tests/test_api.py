@@ -651,3 +651,35 @@ def test_review_uses_spec_used_at_scan(client):
     assert client.put("/api/spec", json=other).status_code == 200
     d = client.get(f"/api/responses/{up['response_id']}").json()
     assert d["spec"]["questions"][0]["answers"][:2] == ["ja", "nein"]
+
+
+def test_body_limit_respects_root_path(client):
+    with TestClient(app, root_path="/x") as c:
+        r = c.post("/x/api/logo", content=b"x" * (3 * 1024 * 1024 + 1),
+                   headers={"Content-Type": "multipart/form-data; boundary=B"})
+    assert r.status_code == 413
+
+
+def test_response_spec_fallbacks(client):
+    import app.main as main_mod
+    a = default_spec()
+    a.free_text_prompt = "Fragebogen A"
+    b = default_spec()
+    b.free_text_prompt = "ganz anders"
+    ha = a.fingerprint()
+    # Altbestand-Scan mit Hash A: data/specs fehlt, Stapel-Snapshot mit A vorhanden
+    a.save(main_mod.TEMPLATES_DIR / ("f" * 32 + ".json"))
+    b.save(main_mod.SPEC_PATH)  # aktive Spec ist B
+    assert main_mod._response_spec(ha, None).fingerprint() == ha
+    assert (main_mod.SPECS_DIR / f"{ha}.json").exists()  # Treffer nach data/specs geschrieben
+    # beschädigte data/specs-Datei → Fallback
+    (main_mod.SPECS_DIR / f"{ha}.json").write_text("{kaputt")
+    assert main_mod._response_spec(ha, None).fingerprint() == ha
+    # kein passender Snapshot, aktive Spec B → 409
+    (main_mod.TEMPLATES_DIR / ("f" * 32 + ".json")).unlink()
+    (main_mod.SPECS_DIR / f"{ha}.json").unlink()
+    b.free_text_prompt = "noch anders"
+    b.save(main_mod.SPEC_PATH)
+    with pytest.raises(main_mod.HTTPException) as e:
+        main_mod._response_spec(ha, None)
+    assert e.value.status_code == 409
