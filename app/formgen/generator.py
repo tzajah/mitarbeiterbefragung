@@ -28,7 +28,14 @@ from .layout import (
     PAGE_H_MM,
     PAGE_W_MM,
     QR_BOX_MM,
+    HEAD_FONT,
+    HEAD_LINE_H,
+    HEAD_MAX_LINES,
+    HEAD_SIZE,
     compute_layout,
+    fit_text as _fit_text,
+    pts as _pts,
+    wrap as _wrap,
 )
 from .spec import SurveySpec
 from .stack_id import qr_payload
@@ -36,7 +43,6 @@ from .stack_id import qr_payload
 PAGES = 2
 GRAY = (0.42, 0.42, 0.42)
 LINE_GRAY = (0.78, 0.78, 0.78)
-HEAD_FONT, HEAD_SIZE = "Helvetica-Bold", 5.6   # Optionslabels in der Kopfzeile
 INTRO_SIZE = 7.2
 PAGE2_HINT = ("Bitte gut lesbar schreiben (gern in Druckbuchstaben) und keine Namen "
               "nennen – auch nicht den eigenen.")
@@ -48,44 +54,9 @@ def Y(y_mm_from_top: float) -> float:
     return (PAGE_H_MM - y_mm_from_top) * mm
 
 
-def _pts(width_mm: float) -> float:
-    return width_mm / 25.4 * 72.0
-
-
-def _fit_text(text: str, font: str, size: float, max_width_mm: float) -> str:
-    """Kürzt Text mit Ellipse, damit er exakt in max_width_mm passt."""
-    max_pts = _pts(max_width_mm)
-    if stringWidth(text, font, size) <= max_pts:
-        return text
-    while text and stringWidth(text + "…", font, size) > max_pts:
-        text = text[:-1]
-    return text + "…"
-
-
-def _wrap(text: str, font: str, size: float, width_mm: float,
-          max_lines: int) -> tuple[list[str], bool]:
-    """Wortweiser Umbruch; (Zeilen, passt_vollständig). Rest → Ellipse in der letzten Zeile."""
-    max_pts, lines, cur = _pts(width_mm), [], ""
-    for word in text.split():
-        cand = f"{cur} {word}".strip()
-        if stringWidth(cand, font, size) <= max_pts:
-            cur = cand
-            continue
-        if cur:
-            lines.append(cur)
-        cur = word
-    if cur:
-        lines.append(cur)
-    ok = len(lines) <= max_lines and all(stringWidth(s, font, size) <= max_pts for s in lines)
-    if not ok:
-        lines = lines[:max_lines - 1] + [_fit_text(" ".join(lines[max_lines - 1:]), font,
-                                                    size, width_mm)]
-    return lines, ok
-
-
 def label_fits(label: str) -> bool:
-    """Passt ein Optionslabel (max. 2 Zeilen) in die Spalte der Kopfzeile?"""
-    return _wrap(label, HEAD_FONT, HEAD_SIZE, COL_W - 1.2, 2)[1]
+    """Passt ein Optionslabel (max. HEAD_MAX_LINES Zeilen) in die Spalte der Kopfzeile?"""
+    return _wrap(label, HEAD_FONT, HEAD_SIZE, COL_W - 1.2, HEAD_MAX_LINES)[1]
 
 
 def intro_fits(text: str) -> bool:
@@ -197,10 +168,11 @@ def _draw_tables(c: canvas.Canvas, spec: SurveySpec) -> None:
         c.drawString((CONTENT_X0 + 2) * mm, Y(mid + 1.0), "Frage")
         c.setFont(HEAD_FONT, HEAD_SIZE)
         for label, x in zip(h.labels, h.xs):
-            lines, _ = _wrap(label, HEAD_FONT, HEAD_SIZE, COL_W - 1.2, 2)
-            base = mid + 0.75 if len(lines) == 1 else mid - 0.45
+            lines, _ = _wrap(label, HEAD_FONT, HEAD_SIZE, COL_W - 1.2,
+                             HEAD_MAX_LINES if lay.version >= 3 else 2)
+            base = mid + 0.75 - (len(lines) - 1) * HEAD_LINE_H / 2   # Textblock vertikal zentriert
             for k, line in enumerate(lines):
-                c.drawCentredString(x * mm, Y(base + k * 2.35), line)
+                c.drawCentredString(x * mm, Y(base + k * HEAD_LINE_H), line)
     c.setFillColorRGB(0, 0, 0)
     for q, row in zip(spec.questions, lay.rows):
         width = row.text_x1 - (CONTENT_X0 + 2)

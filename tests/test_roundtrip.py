@@ -175,3 +175,51 @@ def test_page_fit_limits():
     # Altbestand ohne layout_version → altes festes Raster
     legacy = SurveySpec.from_dict({k: v for k, v in thirty.items() if k != "layout_version"})
     assert compute_layout(legacy).rows[0].y == 46.0
+
+
+LONG = "Trifft in den meisten Fällen eher nicht auf meine Arbeit zu"  # 59 Zeichen, 6 Zeilen
+
+
+def long_spec():
+    from app.formgen.spec import Question, SurveySpec
+    labels = [LONG, "eher ja", "ja"]
+    qs = [Question(f"q{i:02d}", f"Frage {i}", "scale", scale_labels=labels) for i in range(1, 5)]
+    qs.append(Question("q05", "Kurz", "scale", scale_labels=["ja", "nein"]))
+    return SurveySpec("Lange Labels", qs)
+
+
+def test_long_labels_grow_header():
+    from app.formgen.generator import label_fits
+    from app.formgen.layout import HEAD_H, compute_layout
+    assert label_fits(LONG)
+    lay = compute_layout(long_spec())
+    assert lay.version == 3
+    long_h, short_h = lay.headers
+    assert long_h.y1 - long_h.y0 > HEAD_H
+    assert short_h.y1 - short_h.y0 == HEAD_H
+    assert render_pdf(long_spec(), new_stack_id()).startswith(b"%PDF")
+
+
+def test_v2_layout_unchanged():
+    from app.formgen.layout import HEAD_H, HEAD_GAP, TABLE_Y0, compute_layout
+    spec = long_spec()
+    spec.layout_version = 2
+    lay = compute_layout(spec)
+    assert lay.version == 2
+    assert [(h.y0, h.y1) for h in lay.headers] == [(TABLE_Y0, TABLE_Y0 + HEAD_H),
+                                                    (lay.headers[1].y0, lay.headers[1].y0 + HEAD_H)]
+    assert lay.rows[0].y == TABLE_Y0 + HEAD_H + HEAD_GAP + lay.pitch / 2
+
+
+def test_roundtrip_long_labels_v3():
+    spec = long_spec()
+    sid = new_stack_id()
+    pdf = render_pdf(spec, sid)
+    rng = np.random.default_rng(11)
+    answers = {q.id: int(rng.integers(0, len(q.answers()))) for q in spec.questions}
+    img = fill_form(render_pdf_to_image(pdf), spec, answers, rng=rng)
+    result = read_scan(simulate_scan(img, rng=rng), spec)
+    assert result.stack_id == sid
+    for r in result.answers:
+        assert r.value == spec_q_label(spec, r.question_id, answers[r.question_id])
+        assert not r.needs_review

@@ -490,7 +490,7 @@ def _spec_from_input(body: SpecIn) -> SurveySpec:
         if q.kind not in ("scale", "choice"):
             raise HTTPException(422, f"{where}: Typ muss Skala oder Auswahl sein")
         text = need(q.text, f"{where}: Fragetext", 100)
-        opts = [need(o, f"{where}: Antwortoption", 40)
+        opts = [need(o, f"{where}: Antwortoption", 80)
                 for o in (q.options if q.kind == "choice" else q.scale_labels)]
         if not (2 <= len(opts) <= MAX_OPTIONS):
             raise HTTPException(422, f"{where}: 2–{MAX_OPTIONS} Antwortoptionen nötig "
@@ -502,7 +502,7 @@ def _spec_from_input(body: SpecIn) -> SurveySpec:
                 raise HTTPException(422, f"{where}: '{NO_ANSWER}' wird automatisch ergänzt")
             if not label_fits(o):
                 raise HTTPException(422, f"{where}: Option '{o}' ist zu lang für die Spalte "
-                                         "(max. zwei kurze Zeilen, ca. 2 × 12 Zeichen)")
+                                         "(max. sechs Zeilen à ca. 12 Zeichen; einzelne Wörter höchstens ca. 12 Zeichen)")
         qs.append(Question(id=f"q{i:02d}", text=text, kind=q.kind,
                            options=opts if q.kind == "choice" else [],
                            scale_labels=opts if q.kind == "scale" else []))

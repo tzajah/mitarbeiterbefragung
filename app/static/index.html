@@ -556,7 +556,7 @@ function renderSpec() {
     const key = () => (q.kind === "choice" ? "options" : "scale_labels");
     const fill = () => {
       hint.textContent = (q.kind === "choice" ? "Antwortoptionen" : "Skalenstufen") +
-        " (eine pro Zeile, 2–5; „Keine Angabe“ wird automatisch ergänzt):";
+        " (eine pro Zeile, 2–5, je bis 80 Zeichen; „Keine Angabe“ wird automatisch ergänzt):";
       ta.value = q[key()].join("\n");
     };
     ta.oninput = () => { q[key()] = ta.value.split("\n"); };
